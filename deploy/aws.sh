@@ -337,7 +337,7 @@ function_up() { # name topic-arn alerts-arn
   cp "$DIST/$1.mjs" "$dir/index.mjs"
   (cd "$dir" && zip -q function.zip index.mjs)
   # Every value is checked above (names, ARNs, addresses), so none can carry a quote into this JSON.
-  local env="{\"Variables\":{\"CHUTCHUT_BUCKET\":\"$BUCKET\",\"CHUTCHUT_TABLE\":\"$TABLE\",\"CHUTCHUT_TOPIC_ARN\":\"$2\",\"CHUTCHUT_ALERTS_ARN\":\"$3\",\"CHUTCHUT_PAIRED\":\"$PAIRED\"}}"
+  local env="{\"Variables\":{\"CHUTCHUT_BUCKET\":\"$BUCKET\",\"CHUTCHUT_TABLE\":\"$TABLE\",\"CHUTCHUT_TOPIC_ARN\":\"$2\",\"CHUTCHUT_ALERTS_ARN\":\"$3\",\"CHUTCHUT_PAIRED\":\"$PAIRED\",\"CHUTCHUT_RECIPIENTS\":\"$(printf '%s' "$RECIPIENTS" | tr -d ' ')\"}}"
   if aws lambda get-function --function-name "$fn" --query Configuration.FunctionName >/dev/null 2>&1; then
     aws lambda update-function-code --function-name "$fn" --zip-file "fileb://$dir/function.zip" --query FunctionName >/dev/null
     aws lambda wait function-updated-v2 --function-name "$fn"

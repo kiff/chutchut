@@ -14,6 +14,8 @@ export interface Config {
   alertsArn: string;
   /** The paired senders' addresses, until pairing is kept in the table. */
   paired: Pairing;
+  /** The addresses and domains SES receives for (CHUTCHUT_RECIPIENTS): the per-address cap counts by them. */
+  entries: string[];
   limits: Limits;
 }
 
@@ -44,6 +46,7 @@ export function config(env: Record<string, string | undefined>): Config {
     topicArn,
     alertsArn,
     paired: pairing(paired),
+    entries: (env.CHUTCHUT_RECIPIENTS ?? "").split(",").map((e) => e.trim().toLowerCase()).filter((e) => e !== ""),
     // The Solo plan's limits by default (one address): the design's numbers.
     limits: {
       inboundPerDay: count(env, "CHUTCHUT_INBOUND_PER_DAY", 100),

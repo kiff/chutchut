@@ -31,6 +31,7 @@ export async function handler(event: UrlEvent): Promise<{ statusCode: number; bo
   const answer = await webhook(body, {
     sns: { topicArn: c.topicArn, now: () => new Date(), certificate },
     bucket: c.bucket,
+    entries: c.entries,
     paired: async () => c.paired,
     limits: c.limits,
     store,
