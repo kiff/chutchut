@@ -60,7 +60,8 @@ def check(changed: list[tuple[str, str]], branch: str, empty_on_base: bool = Fal
             errors.append(f"fragments are removed but {CHANGELOG} is unchanged: run scripts/changelog.py fold so no entry is lost")
         return errors
     errors = []
-    if any(path == CHANGELOG for _, path in changed):
+    # Creating CHANGELOG.md, where the base has none, starts it: only an edit of one that's there is refused.
+    if any(path == CHANGELOG and not status.startswith("A") for status, path in changed):
         errors.append(f"{CHANGELOG} is edited: put the entry in {fragment_name(branch)} instead")
     added = [path for status, path in fragments if status.startswith("A")]
     others = [path for status, path in fragments if not status.startswith("A")]

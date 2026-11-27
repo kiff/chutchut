@@ -12,6 +12,12 @@ class Check(unittest.TestCase):
     def test_one_fragment_named_for_the_branch_passes(self):
         self.assertEqual(changelog.check([("A", "changes/android-batch-56.md"), ("M", "android/x.kt")], "android/batch-56"), [])
 
+    def test_a_new_changelog_is_started_not_edited(self):
+        # The base has no CHANGELOG.md yet: the pull request that creates it passes its own check.
+        self.assertEqual(changelog.check([("A", "CHANGELOG.md"), ("A", "changes/a-b.md")], "a/b"), [])
+        # Removing it is an edit, as changing it is.
+        self.assertIn("CHANGELOG.md is edited", changelog.check([("D", "CHANGELOG.md"), ("A", "changes/a-b.md")], "a/b")[0])
+
     def test_editing_the_changelog_fails(self):
         errors = changelog.check([("A", "changes/a-b.md"), ("M", "CHANGELOG.md")], "a/b")
         self.assertEqual(len(errors), 1)

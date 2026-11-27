@@ -14,7 +14,13 @@ export interface Sender {
   dmarcAligned: boolean;
 }
 
-/** Which door the mail takes. Pairing counts only DMARC-aligned mail, so a spoofed From always knocks. */
+/**
+ * Which door the mail takes. Pairing counts only DMARC-aligned mail, so a spoofed From always knocks.
+ *
+ * DMARC proves the From's **domain**, not the mailbox: on a domain whose own users can send as any address, one of
+ * them passes as a paired sender. Pairing says so to the owner where it's set up, and a paired sender stays under its
+ * Card either way.
+ */
 export function door(sender: Sender, paired: ReadonlySet<string>): Door {
   return sender.dmarcAligned && paired.has(normalize(sender.address)) ? "paired" : "knock";
 }
