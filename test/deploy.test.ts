@@ -1,4 +1,7 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 // The policies deploy/aws.sh sets, read with no AWS access (its `policies` mode, a made-up account).
@@ -71,5 +74,42 @@ describe("deploy", () => {
   it("asks for a bucket and refuses an unknown mode", () => {
     expect(() => execFileSync("bash", ["deploy/aws.sh", "policies"], { env: { PATH: process.env.PATH }, stdio: "pipe" })).toThrow();
     expect(() => execFileSync("bash", ["deploy/aws.sh", "down"], { env: { PATH: process.env.PATH, LOGE_BUCKET: "b" }, stdio: "pipe" })).toThrow();
+  });
+
+  // `up` against a stand-in for the aws command (never AWS itself): a failure inside $(topic) must stop the run, so
+  // inherit_errexit can't be dropped without this going red. It needs bash 4.4 or later, as `up` does.
+  const modern = spawnSync("bash", ["-c", "shopt -s inherit_errexit"]).status === 0;
+  function upWithStub(failOn: string): { status: number | null; out: string } {
+    const dir = mkdtempSync(join(tmpdir(), "loge-aws-"));
+    writeFileSync(join(dir, "aws"), `#!/usr/bin/env bash
+args="$*"
+case "$args" in
+  *"${failOn}"*) echo "stub refused: ${failOn}" >&2; exit 1 ;;
+  *"sts get-caller-identity"*) echo 000000000000 ;;
+  *"kms describe-key"*) echo key-1 ;;
+  *"sns create-topic"*) echo arn:aws:sns:eu-west-1:000000000000:loge-inbound ;;
+  *"iam get-role"*"Role.Arn"*) echo arn:aws:iam::000000000000:role/loge-malware-scan ;;
+esac
+exit 0
+`);
+    chmodSync(join(dir, "aws"), 0o755);
+    const run = spawnSync("bash", ["deploy/aws.sh", "up"], {
+      env: { PATH: `${dir}:${process.env.PATH}`, LOGE_BUCKET: "loge-inbound-test", LOGE_RECIPIENTS: "support@example.test" },
+    });
+    return { status: run.status, out: run.stdout.toString() };
+  }
+
+  it.skipIf(!modern)("runs to the end when every call succeeds (against a stand-in, never AWS)", () => {
+    const run = upWithStub("never-matches");
+    expect(run.status).toBe(0);
+    expect(run.out).toContain("loge inbound: bucket loge-inbound-test");
+  });
+
+  it.skipIf(!modern)("stops, and never reports success, when a call inside $(topic) fails", () => {
+    for (const failOn of ["SignatureVersion", "KmsMasterKeyId", "put-key-policy", "--attribute-name Policy"]) {
+      const run = upWithStub(failOn);
+      expect(run.status, failOn).not.toBe(0);
+      expect(run.out, failOn).not.toContain("loge inbound:");
+    }
   });
 });
