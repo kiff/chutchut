@@ -2,7 +2,8 @@
  * What happens to mail at a door, before anything reads it.
  *
  * - A **paired** sender (proven by DMARC-aligned mail) goes to its agent, under its Card.
- * - **Anyone else knocks**: kept for the owner, never sent to the AI, never read as instructions.
+ * - **Anyone else knocks**: kept for the owner, not sent to the AI unless the owner hands it to an agent (Do it),
+ *   and never read as instructions.
  *
  * The transports (SES first), the knocks' store and the Record come in their own changes.
  */
