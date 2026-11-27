@@ -18,7 +18,7 @@ import { checkSns, type SnsCheck } from "./sns.js";
  *   it to an agent. (Mail a paired sender sent, once scanned clean, is kept as the owner's mail by the reader.)
  */
 export interface Limits {
-  /** Messages a day for this address, before the rest are held. */
+  /** Messages a day for each address of ours, before the rest are held. Every cap here counts per address. */
   inboundPerDay: number;
   /** Knocks shown a day for one sender; the rest go to the digest. */
   knocksPerSender: number;
@@ -113,7 +113,7 @@ async function place(r: Route, base: { messageId: string; objectKey: string; at:
   if (r.to === "held") return { ...base, state: "held", why: r.why };
   const sent = "from" in r ? r.from : undefined;
   const from = sent === undefined ? {} : { from: sent };
-  if ((await w.store.bump(`${day}:in`)) > w.limits.inboundPerDay) {
+  if ((await w.store.bump(`${day}:${r.recipient}:in`)) > w.limits.inboundPerDay) {
     return { ...base, ...from, state: "held", why: "over the day's mail" };
   }
   if (r.to === "paired") return { ...base, ...from, state: "pending_scan" };
@@ -123,8 +123,8 @@ async function place(r: Route, base: { messageId: string; objectKey: string; at:
   const sender = sent?.toLowerCase() ?? "(no sender)";
   const domain = sender.split("@")[1] ?? "(no sender)";
   const shown =
-    (await w.store.bump(`${day}:knock:sender:${sender}`)) <= w.limits.knocksPerSender &&
-    (await w.store.bump(`${day}:knock:domain:${domain}`)) <= w.limits.knocksPerDomain &&
-    (await w.store.bump(`${day}:knock`)) <= w.limits.knocksPerDay;
+    (await w.store.bump(`${day}:${r.recipient}:knock:sender:${sender}`)) <= w.limits.knocksPerSender &&
+    (await w.store.bump(`${day}:${r.recipient}:knock:domain:${domain}`)) <= w.limits.knocksPerDomain &&
+    (await w.store.bump(`${day}:${r.recipient}:knock`)) <= w.limits.knocksPerDay;
   return { ...base, ...from, state: "knock", shown };
 }

@@ -1,4 +1,7 @@
-import { ConditionalCheckFailedException, GetItemCommand, PutItemCommand, UpdateItemCommand, type DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  ConditionalCheckFailedException, GetItemCommand, PutItemCommand, ScanCommand, UpdateItemCommand, type AttributeValue, type DynamoDBClient,
+} from "@aws-sdk/client-dynamodb";
+import type { Shelf } from "./reader.js";
 import type { Filed, Store } from "./webhook.js";
 
 /**
@@ -52,6 +55,63 @@ export function dynamoStore(client: Pick<DynamoDBClient, "send">, table: string,
         if (e instanceof ConditionalCheckFailedException) return false;
         throw e;
       }
+    },
+  };
+}
+
+/**
+ * The reader's `Shelf` on the same table. Each change is one conditional update on the item's state, so an event
+ * GuardDuty sends twice changes it once, and nothing moves an item out of a state it isn't in.
+ */
+export function dynamoShelf(client: Pick<DynamoDBClient, "send">, table: string): Shelf {
+  const key = (id: string) => ({ pk: { S: `msg#${id}` } });
+  // "state" and "from" are DynamoDB reserved words, so they're always named through #s and #from.
+  async function change(id: string, update: string, values: Record<string, { S: string }>, condition: string): Promise<boolean> {
+    const names: Record<string, string> = { "#s": "state" };
+    if (update.includes("#from")) names["#from"] = "from";
+    try {
+      await client.send(new UpdateItemCommand({
+        TableName: table, Key: key(id), UpdateExpression: update, ConditionExpression: condition,
+        ExpressionAttributeNames: names, ExpressionAttributeValues: values,
+      }));
+      return true;
+    } catch (e) {
+      if (e instanceof ConditionalCheckFailedException) return false;
+      throw e;
+    }
+  }
+  return {
+    async get(id) {
+      const got = await client.send(new GetItemCommand({
+        TableName: table, Key: key(id), ProjectionExpression: "#s, #at",
+        ExpressionAttributeNames: { "#s": "state", "#at": "at" }, ConsistentRead: true,
+      }));
+      const state = got.Item?.state?.S;
+      const at = got.Item?.at?.S;
+      return state === undefined || at === undefined ? undefined : { state, at };
+    },
+    // Kept mail loses its expiry: it stays until the owner deletes it.
+    keep: (id, keptKey) => change(id, "SET #s = :mail, objectKey = :kept REMOVE expiresAt, purgeAt",
+      { ":mail": { S: "mail" }, ":kept": { S: keptKey }, ":pending": { S: "pending_scan" } }, "#s = :pending"),
+    // Refused mail never keeps its sender's address, and keeps its 30-day expiry.
+    refuse: (id, why) => change(id, "SET #s = :refused, why = :why REMOVE #from, shown",
+      { ":refused": { S: "refused" }, ":why": { S: why }, ":pending": { S: "pending_scan" }, ":knock": { S: "knock" }, ":held": { S: "held" } },
+      "#s IN (:pending, :knock, :held)"),
+    hold: (id, why) => change(id, "SET #s = :held, why = :why",
+      { ":held": { S: "held" }, ":why": { S: why }, ":pending": { S: "pending_scan" } }, "#s = :pending"),
+    async pendingBefore(before) {
+      const ids: string[] = [];
+      let start: Record<string, AttributeValue> | undefined;
+      do {
+        const page = await client.send(new ScanCommand({
+          TableName: table, FilterExpression: "#s = :pending AND #at < :before", ProjectionExpression: "messageId",
+          ExpressionAttributeNames: { "#s": "state", "#at": "at" },
+          ExpressionAttributeValues: { ":pending": { S: "pending_scan" }, ":before": { S: before } }, ExclusiveStartKey: start,
+        }));
+        for (const item of page.Items ?? []) if (item.messageId?.S !== undefined) ids.push(item.messageId.S);
+        start = page.LastEvaluatedKey;
+      } while (start !== undefined);
+      return ids;
     },
   };
 }

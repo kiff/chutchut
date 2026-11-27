@@ -10,8 +10,9 @@ import { mailboxes, sender } from "./from.js";
  * - A virus scan that didn't finish: held, for the owner, never for an agent.
  * - Otherwise the door decides, and only mail whose DMARC passed can be a paired sender's.
  */
-export type Route = { to: Door; messageId: string; objectKey: string; from: string | undefined }
-  | { to: "held" | "refused"; messageId: string; objectKey: string; why: string };
+/** `recipient` is the address of ours it came to (SES's receipt.recipients, the first, lower-cased): caps count per address. */
+export type Route = { to: Door; messageId: string; objectKey: string; recipient: string; from: string | undefined }
+  | { to: "held" | "refused"; messageId: string; objectKey: string; recipient: string; why: string };
 
 interface Verdict { status?: string }
 interface Received {
@@ -23,6 +24,7 @@ interface Received {
     commonHeaders?: { from?: unknown };
   };
   receipt?: {
+    recipients?: unknown;
     spamVerdict?: Verdict; virusVerdict?: Verdict; dkimVerdict?: Verdict; spfVerdict?: Verdict; dmarcVerdict?: Verdict;
     action?: { type?: string; bucketName?: string; objectKey?: string };
   };
@@ -43,12 +45,14 @@ export function route(message: string, paired: Pairing, bucket: string): Route |
     return undefined;
   }
   const objectKey = action.objectKey;
+  const listed = n.receipt?.recipients;
+  const recipient = Array.isArray(listed) && typeof listed[0] === "string" && listed[0] !== "" ? listed[0].toLowerCase() : "(no recipient)";
   const status = (v: Verdict | undefined) => (typeof v?.status === "string" ? v.status : "MISSING");
   const virus = status(n.receipt?.virusVerdict);
   const spam = status(n.receipt?.spamVerdict);
-  if (virus === "FAIL") return { to: "refused", messageId, objectKey, why: "a virus" };
-  if (spam === "FAIL") return { to: "refused", messageId, objectKey, why: "spam" };
-  if (virus !== "PASS") return { to: "held", messageId, objectKey, why: "the virus scan didn't finish" };
+  if (virus === "FAIL") return { to: "refused", messageId, objectKey, recipient, why: "a virus" };
+  if (spam === "FAIL") return { to: "refused", messageId, objectKey, recipient, why: "spam" };
+  if (virus !== "PASS") return { to: "held", messageId, objectKey, recipient, why: "the virus scan didn't finish" };
   // One header of each, as sent: a message with two From headers has no sender at all.
   const headers = (n.mail?.headers ?? []).filter((h) => typeof h?.name === "string");
   const named = (name: string) => headers.filter((h) => h.name!.toLowerCase() === name).map((h) => (typeof h.value === "string" ? h.value : ""));
@@ -64,5 +68,5 @@ export function route(message: string, paired: Pairing, bucket: string): Route |
   const from = read !== undefined && sesOne?.length === 1 && sesOne[0]!.toLowerCase() === read.toLowerCase() ? read : undefined;
   // Spam that SES couldn't judge may still knock, but never passes as a paired sender's.
   const aligned = status(n.receipt?.dmarcVerdict) === "PASS" && spam === "PASS";
-  return { to: from === undefined ? "knock" : door({ address: from, dmarcAligned: aligned }, paired), messageId, objectKey, from };
+  return { to: from === undefined ? "knock" : door({ address: from, dmarcAligned: aligned }, paired), messageId, objectKey, recipient, from };
 }

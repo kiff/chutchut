@@ -19,7 +19,7 @@ function sns(fields: Partial<SnsMessage>): string {
   return JSON.stringify(m);
 }
 
-function mail(id: string, from: string, verdicts: Record<string, string> = {}): string {
+function mail(id: string, from: string, verdicts: Record<string, string> = {}, to = "support@example.test"): string {
   const v = { spam: "PASS", virus: "PASS", dkim: "PASS", spf: "PASS", dmarc: "PASS", ...verdicts };
   return sns({
     MessageId: `n-${id}`,
@@ -28,7 +28,7 @@ function mail(id: string, from: string, verdicts: Record<string, string> = {}): 
       mail: { messageId: id, headersTruncated: false, headers: [{ name: "From", value: from }], commonHeaders: { from: [from] } },
       receipt: {
         spamVerdict: { status: v.spam }, virusVerdict: { status: v.virus }, dkimVerdict: { status: v.dkim },
-        spfVerdict: { status: v.spf }, dmarcVerdict: { status: v.dmarc },
+        spfVerdict: { status: v.spf }, dmarcVerdict: { status: v.dmarc }, recipients: [to],
         action: { type: "S3", bucketName: bucket, objectKey: `in/${id}` },
       },
     }),
@@ -116,6 +116,14 @@ describe("webhook", () => {
       await webhook(mail(id!, from!), w);
     }
     expect(store.items.map((f) => (f.state === "knock" && f.shown ? f.messageId : "-")).join("")).toBe("a--d-f-");
+  });
+
+  it("counts every cap per address of ours, so one busy address never holds another's mail", async () => {
+    const { w, store } = setup({ inboundPerDay: 1, knocksPerSender: 1 });
+    await webhook(mail("m1", "ana@example.test", {}, "support@example.test"), w);
+    await webhook(mail("m2", "ana@example.test", {}, "billing@example.test"), w);
+    await webhook(mail("m3", "ana@example.test", {}, "SUPPORT@example.test"), w);
+    expect(store.items.map((f) => f.state)).toEqual(["pending_scan", "pending_scan", "held"]);
   });
 
   it("holds, never drops, mail past the day's cap", async () => {

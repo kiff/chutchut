@@ -19,6 +19,7 @@ function received(over: { verdicts?: Record<string, string>; headers?: [string, 
     receipt: {
       spamVerdict: { status: v.spam }, virusVerdict: { status: v.virus }, dkimVerdict: { status: v.dkim },
       spfVerdict: { status: v.spf }, dmarcVerdict: { status: v.dmarc },
+      recipients: ["Support@Example.test"],
       action: { type: "S3", bucketName: over.bucket ?? bucket, objectKey: "in/m-1" },
     },
   });
@@ -26,7 +27,7 @@ function received(over: { verdicts?: Record<string, string>; headers?: [string, 
 
 describe("ses", () => {
   it("sends a paired sender's clean, DMARC-passing mail to the paired door", () => {
-    expect(route(received(), paired, bucket)).toEqual({ to: "paired", messageId: "m-1", objectKey: "in/m-1", from: "ana@example.test" });
+    expect(route(received(), paired, bucket)).toEqual({ to: "paired", messageId: "m-1", objectKey: "in/m-1", recipient: "support@example.test", from: "ana@example.test" });
   });
 
   it("makes it knock when DMARC didn't pass, or spam couldn't be judged", () => {
