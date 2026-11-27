@@ -67,7 +67,7 @@ describe("send", () => {
       expect(await sendReply(reply(over), s)).toMatchObject({ status: 403 });
       expect(sent).toEqual([]);
     }
-    for (const item of [{ state: "pending_scan" }, { state: "knock", shown: true }, { state: "held" }, { state: "refused" }, { purgeAt: "2026-11-27T00:00:00.000Z" }]) {
+    for (const item of [{ state: "pending_scan" }, { state: "knock", shown: true }, { state: "held" }, { state: "refused" }, { purgeAt: "2026-11-27T00:00:00.000Z" }, { purgeAt: "" }, { purgeAt: "not a date" }]) {
       const { s, sent } = setup(item);
       expect(await sendReply(reply(), s), JSON.stringify(item)).toMatchObject({ status: 403 });
       expect(sent).toEqual([]);

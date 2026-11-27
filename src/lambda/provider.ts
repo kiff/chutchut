@@ -39,7 +39,7 @@ export async function handler(event: UrlEvent) {
   const i = got.Item;
   const item = i && { state: i.state?.S ?? "", shown: i.shown?.S === "yes", clean: i.clean?.S === "yes" };
   // Never one the scan didn't clear, or one past its 30 days: the same answer as one that isn't there.
-  if (!item || !readable(item) || Date.parse(i.purgeAt?.S ?? "") <= Date.now()) return answer(404, { error: "not found" });
+  if (!item || !readable(item) || !(Date.parse(i.purgeAt?.S ?? "") > Date.now())) return answer(404, { error: "not found" });
   const obj = await s3.send(new GetObjectCommand({ Bucket: c.bucket, Key: i.objectKey?.S ?? `in/${id}` }));
   const raw = Buffer.from(await obj.Body!.transformToByteArray());
   const auth = i.auth?.S !== undefined ? (JSON.parse(i.auth.S) as Auth) : undefined;

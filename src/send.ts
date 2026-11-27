@@ -57,7 +57,7 @@ export async function sendReply(r: Reply, s: Sending): Promise<Sent> {
   if (!/^<[^<>\s]{1,250}>$/.test(inReplyTo)) return { status: 403, said: "only a reply to a message that came here" };
   const thread = await s.thread(inReplyTo);
   const item = thread && (await s.item(thread.messageId));
-  if (thread === undefined || item === undefined || !readable(item) || Date.parse(item.purgeAt ?? "") <= s.now().getTime()) {
+  if (thread === undefined || item === undefined || !readable(item) || !(Date.parse(item.purgeAt ?? "") > s.now().getTime())) {
     return { status: 403, said: "only a reply to a message that came here" };
   }
   if (thread.from.toLowerCase() !== to) return { status: 403, said: "only to whoever wrote it" };
