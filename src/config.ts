@@ -47,6 +47,8 @@ export function config(env: Record<string, string | undefined>): Config {
     // The Solo plan's limits by default (one address): the design's numbers.
     limits: {
       inboundPerDay: count(env, "CHUTCHUT_INBOUND_PER_DAY", 100),
+      // One address on the Solo plan, so the account's cap is the address's by default.
+      accountPerDay: count(env, "CHUTCHUT_ACCOUNT_PER_DAY", 100),
       knocksPerSender: count(env, "CHUTCHUT_KNOCKS_PER_SENDER", 1),
       knocksPerDomain: count(env, "CHUTCHUT_KNOCKS_PER_DOMAIN", 10),
       knocksPerDay: count(env, "CHUTCHUT_KNOCKS_PER_DAY", 50),
