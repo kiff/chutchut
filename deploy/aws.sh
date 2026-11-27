@@ -152,8 +152,9 @@ function_policy() { # account function
   case "$2" in
     webhook) own="{\"Sid\":\"Table\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\",\"dynamodb:PutItem\",\"dynamodb:UpdateItem\"],\"Resource\":\"$table\"}" ;;
     reader) own="{\"Sid\":\"Table\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\",\"dynamodb:UpdateItem\"],\"Resource\":\"$table\"},
- {\"Sid\":\"ReadIn\",\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::$BUCKET/$PREFIX*\"},
- {\"Sid\":\"WriteKept\",\"Effect\":\"Allow\",\"Action\":\"s3:PutObject\",\"Resource\":\"arn:aws:s3:::$BUCKET/kept/*\"}" ;;
+ {\"Sid\":\"ReadIn\",\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\",\"s3:GetObjectTagging\"],\"Resource\":\"arn:aws:s3:::$BUCKET/$PREFIX*\"},
+ {\"Sid\":\"WriteKept\",\"Effect\":\"Allow\",\"Action\":[\"s3:PutObject\",\"s3:PutObjectTagging\"],\"Resource\":\"arn:aws:s3:::$BUCKET/kept/*\"},
+ {\"Sid\":\"Failed\",\"Effect\":\"Allow\",\"Action\":\"sns:Publish\",\"Resource\":\"arn:aws:sns:$REGION:$1:$ALERTS\"}" ;;
     stale) own="{\"Sid\":\"Table\",\"Effect\":\"Allow\",\"Action\":\"dynamodb:Scan\",\"Resource\":\"$table\"},
  {\"Sid\":\"Alert\",\"Effect\":\"Allow\",\"Action\":\"sns:Publish\",\"Resource\":\"arn:aws:sns:$REGION:$1:$ALERTS\"}" ;;
   esac
@@ -393,6 +394,11 @@ arn=$(topic)
 alerts_arn=$(alerts)
 scan
 for f in $FUNCTIONS; do function_up "$f" "$arn" "$alerts_arn"; done
+# The public webhook can't take more than a few at once, so a flood can't run up the table or the account's Lambda room.
+aws lambda put-function-concurrency --function-name "$NAME-webhook" --reserved-concurrent-executions 10 >/dev/null
+# A scan result the reader couldn't handle after EventBridge's retries is raised on the alerts topic, never dropped.
+aws lambda put-function-event-invoke-config --function-name "$NAME-reader" --maximum-retry-attempts 2 \
+  --destination-config "{\"OnFailure\":{\"Destination\":\"$alerts_arn\"}}" >/dev/null
 webhook_up "$arn"
 trigger scanned reader --event-pattern "$(scan_rule_pattern)"
 trigger stale-daily stale --schedule-expression "rate(1 day)"

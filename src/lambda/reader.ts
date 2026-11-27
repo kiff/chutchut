@@ -15,7 +15,8 @@ export async function handler(event: unknown): Promise<string> {
     shelf,
     copy: async (from, to) => {
       await s3.send(new CopyObjectCommand({
-        Bucket: c.bucket, Key: to, CopySource: `${c.bucket}/${encodeURIComponent(from)}`, ServerSideEncryption: "AES256",
+        // The copy keeps GuardDuty's scan tag (TaggingDirective COPY, the default): the role reads it on in/ and writes it on kept/.
+        Bucket: c.bucket, Key: to, CopySource: `${c.bucket}/${encodeURIComponent(from)}`, ServerSideEncryption: "AES256", TaggingDirective: "COPY",
       }));
     },
   });

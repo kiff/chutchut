@@ -82,7 +82,9 @@ describe("deploy", () => {
     expect(actions(policies.webhook)).toEqual([`dynamodb:GetItem ${table}`, `dynamodb:PutItem ${table}`, `dynamodb:UpdateItem ${table}`, ...logs("webhook")].sort());
     expect(actions(policies.reader)).toEqual([
       `dynamodb:GetItem ${table}`, `dynamodb:UpdateItem ${table}`,
-      "s3:GetObject arn:aws:s3:::chutchut-inbound-test/in/*", "s3:PutObject arn:aws:s3:::chutchut-inbound-test/kept/*", ...logs("reader"),
+      "s3:GetObject arn:aws:s3:::chutchut-inbound-test/in/*", "s3:GetObjectTagging arn:aws:s3:::chutchut-inbound-test/in/*",
+      "s3:PutObject arn:aws:s3:::chutchut-inbound-test/kept/*", "s3:PutObjectTagging arn:aws:s3:::chutchut-inbound-test/kept/*",
+      "sns:Publish arn:aws:sns:eu-west-1:000000000000:chutchut-alerts", ...logs("reader"),
     ].sort());
     expect(actions(policies.stale)).toEqual([`dynamodb:Scan ${table}`, "sns:Publish arn:aws:sns:eu-west-1:000000000000:chutchut-alerts", ...logs("stale")].sort());
     expect(policies.lambda_trust.Statement[0].Principal).toEqual({ Service: "lambda.amazonaws.com" });
