@@ -136,7 +136,7 @@ describe("webhook", () => {
     expect(store.items.map((f) => (f.state === "knock" ? (f.shown ? "shown" : "digest") : f.state))).toEqual(["shown", "digest", "digest", "held", "held"]);
   });
 
-  it("counts every cap per address of ours, so one busy address never holds another's mail", async () => {
+  it("counts the mail cap per address of ours, so one busy address never holds another's mail", async () => {
     const { w, store } = setup({ inboundPerDay: 1, knocksPerSender: 1 });
     await webhook(mail("m1", "ana@example.test", {}, "support@example.test"), w);
     await webhook(mail("m2", "ana@example.test", {}, "billing@example.test"), w);
