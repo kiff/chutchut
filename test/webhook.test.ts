@@ -2,7 +2,7 @@ import { generateKeyPairSync, sign } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { pairing } from "../src/door.js";
 import { stringToSign, type SnsMessage } from "../src/sns.js";
-import { subscribeURL, webhook, type Filed, type Store, type Webhook } from "../src/webhook.js";
+import { entry, subscribeURL, webhook, type Filed, type Store, type Webhook } from "../src/webhook.js";
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const pem = publicKey.export({ type: "spki", format: "pem" }).toString();
@@ -116,6 +116,18 @@ describe("webhook", () => {
       await webhook(mail(id!, from!), w);
     }
     expect(store.items.map((f) => (f.state === "knock" && f.shown ? f.messageId : "-")).join("")).toBe("a--d-f-");
+  });
+
+  it("counts a catch-all domain's addresses as one entry for the per-address cap", async () => {
+    const { w, store } = setup({ inboundPerDay: 2 });
+    w.entries = ["example.test", "billing@other.test"];
+    for (let i = 1; i <= 3; i++) await webhook(mail(`m${i}`, "ana@example.test", {}, `a${i}@example.test`), w);
+    expect(store.items.map((f) => f.state)).toEqual(["pending_scan", "pending_scan", "held"]);
+    expect(entry("A9@Example.test", w.entries)).toBe("example.test");
+    expect(entry("x@sub.example.test", w.entries)).toBe("example.test");
+    expect(entry("billing@other.test", w.entries)).toBe("billing@other.test");
+    expect(entry("else@other.test", w.entries)).toBe("else@other.test");
+    expect(entry("x@notexample.test", w.entries)).toBe("x@notexample.test");
   });
 
   it("gives no fresh room to mail spread over many addresses of ours: the account's cap and the knock caps count across them", async () => {

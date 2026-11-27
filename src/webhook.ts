@@ -61,6 +61,11 @@ export interface Store {
 
 export interface Webhook {
   sns: SnsCheck;
+  /**
+   * The addresses and domains SES receives for, as configured (CHUTCHUT_RECIPIENTS). A message's per-address cap
+   * counts against the entry it matched (the domain, for a catch-all), so a1@ … a1000@ share one count.
+   */
+  entries?: string[];
   bucket: string;
   paired: () => Promise<Pairing>;
   limits: Limits;
@@ -114,13 +119,27 @@ export async function webhook(body: string, w: Webhook): Promise<Answer> {
   return { status: 200, said: first ? "filed" : "filed before" };
 }
 
+/** The configured entry a recipient matched: the address itself if it's listed, else its domain if that is. */
+export function entry(recipient: string, entries: string[] | undefined): string {
+  const r = recipient.toLowerCase();
+  const listed = (entries ?? []).map((e) => e.trim().toLowerCase());
+  if (listed.includes(r)) return r;
+  const domain = r.split("@")[1];
+  if (domain !== undefined) {
+    // The most specific listed domain the address is in (sub.example.test before example.test).
+    const match = listed.filter((e) => !e.includes("@") && (domain === e || domain.endsWith(`.${e}`))).sort((a, b) => b.length - a.length)[0];
+    if (match !== undefined) return match;
+  }
+  return r;
+}
+
 async function place(r: Route, base: { messageId: string; objectKey: string; at: string; purgeAt: string }, day: string, w: Webhook): Promise<Filed> {
   if (r.to === "refused") return { ...base, state: "refused", why: r.why };
   if (r.to === "held") return { ...base, state: "held", why: r.why };
   const sent = "from" in r ? r.from : undefined;
   const from = sent === undefined ? {} : { from: sent };
   // Both are counted for each message, so neither can be got round by spreading mail over the other.
-  const byAddress = await w.store.bump(`${day}:${r.recipient}:in`);
+  const byAddress = await w.store.bump(`${day}:${entry(r.recipient, w.entries)}:in`);
   const byAccount = await w.store.bump(`${day}:in`);
   if (byAddress > w.limits.inboundPerDay || byAccount > w.limits.accountPerDay) {
     return { ...base, ...from, state: "held", why: "over the day's mail" };
