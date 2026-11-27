@@ -17,12 +17,18 @@ import { checkSns, type SnsCheck } from "./sns.js";
  *   waiting for its scan. No sender's address is kept for good. A knock is never sent to the AI unless the owner hands
  *   it to an agent. (Mail a paired sender sent, once scanned clean, is kept as the owner's mail by the reader.)
  */
+/**
+ * A day's caps. The mail cap counts per address of ours and, as a backstop, for the whole account, so writing to
+ * a1@ … a1000@ of a domain we receive for gets no fresh room. The knock caps count across every address of ours.
+ */
 export interface Limits {
-  /** Messages a day for this address, before the rest are held. */
+  /** Messages a day for each address of ours, before the rest are held. */
   inboundPerDay: number;
-  /** Knocks shown a day for one sender; the rest go to the digest. */
+  /** Messages a day for the whole account, all addresses together, before the rest are held. */
+  accountPerDay: number;
+  /** Knocks shown a day for one sender, across our addresses; the rest go to the digest. */
   knocksPerSender: number;
-  /** Knocks shown a day for one sender domain; the rest go to the digest. */
+  /** Knocks shown a day for one sender domain, across our addresses; the rest go to the digest. */
   knocksPerDomain: number;
   /** Knocks shown a day in all; the rest go to the digest. */
   knocksPerDay: number;
@@ -55,6 +61,11 @@ export interface Store {
 
 export interface Webhook {
   sns: SnsCheck;
+  /**
+   * The addresses and domains SES receives for, as configured (CHUTCHUT_RECIPIENTS). A message's per-address cap
+   * counts against the entry it matched (the domain, for a catch-all), so a1@ … a1000@ share one count.
+   */
+  entries?: string[];
   bucket: string;
   paired: () => Promise<Pairing>;
   limits: Limits;
@@ -108,12 +119,29 @@ export async function webhook(body: string, w: Webhook): Promise<Answer> {
   return { status: 200, said: first ? "filed" : "filed before" };
 }
 
+/** The configured entry a recipient matched: the address itself if it's listed, else its domain if that is. */
+export function entry(recipient: string, entries: string[] | undefined): string {
+  const r = recipient.toLowerCase();
+  const listed = (entries ?? []).map((e) => e.trim().toLowerCase());
+  if (listed.includes(r)) return r;
+  const domain = r.split("@")[1];
+  if (domain !== undefined) {
+    // The most specific listed domain the address is in (sub.example.test before example.test).
+    const match = listed.filter((e) => !e.includes("@") && (domain === e || domain.endsWith(`.${e}`))).sort((a, b) => b.length - a.length)[0];
+    if (match !== undefined) return match;
+  }
+  return r;
+}
+
 async function place(r: Route, base: { messageId: string; objectKey: string; at: string; purgeAt: string }, day: string, w: Webhook): Promise<Filed> {
   if (r.to === "refused") return { ...base, state: "refused", why: r.why };
   if (r.to === "held") return { ...base, state: "held", why: r.why };
   const sent = "from" in r ? r.from : undefined;
   const from = sent === undefined ? {} : { from: sent };
-  if ((await w.store.bump(`${day}:in`)) > w.limits.inboundPerDay) {
+  // Both are counted for each message, so neither can be got round by spreading mail over the other.
+  const byAddress = await w.store.bump(`${day}:${entry(r.recipient, w.entries)}:in`);
+  const byAccount = await w.store.bump(`${day}:in`);
+  if (byAddress > w.limits.inboundPerDay || byAccount > w.limits.accountPerDay) {
     return { ...base, ...from, state: "held", why: "over the day's mail" };
   }
   if (r.to === "paired") return { ...base, ...from, state: "pending_scan" };

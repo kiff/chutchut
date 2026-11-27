@@ -2,7 +2,7 @@ import { generateKeyPairSync, sign } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { pairing } from "../src/door.js";
 import { stringToSign, type SnsMessage } from "../src/sns.js";
-import { subscribeURL, webhook, type Filed, type Store, type Webhook } from "../src/webhook.js";
+import { entry, subscribeURL, webhook, type Filed, type Store, type Webhook } from "../src/webhook.js";
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const pem = publicKey.export({ type: "spki", format: "pem" }).toString();
@@ -19,7 +19,7 @@ function sns(fields: Partial<SnsMessage>): string {
   return JSON.stringify(m);
 }
 
-function mail(id: string, from: string, verdicts: Record<string, string> = {}): string {
+function mail(id: string, from: string, verdicts: Record<string, string> = {}, to = "support@example.test"): string {
   const v = { spam: "PASS", virus: "PASS", dkim: "PASS", spf: "PASS", dmarc: "PASS", ...verdicts };
   return sns({
     MessageId: `n-${id}`,
@@ -28,7 +28,7 @@ function mail(id: string, from: string, verdicts: Record<string, string> = {}): 
       mail: { messageId: id, headersTruncated: false, headers: [{ name: "From", value: from }], commonHeaders: { from: [from] } },
       receipt: {
         spamVerdict: { status: v.spam }, virusVerdict: { status: v.virus }, dkimVerdict: { status: v.dkim },
-        spfVerdict: { status: v.spf }, dmarcVerdict: { status: v.dmarc },
+        spfVerdict: { status: v.spf }, dmarcVerdict: { status: v.dmarc }, recipients: [to],
         action: { type: "S3", bucketName: bucket, objectKey: `in/${id}` },
       },
     }),
@@ -58,7 +58,7 @@ function setup(limits: Partial<Webhook["limits"]> = {}, failures = 0) {
   const w: Webhook = {
     sns: { topicArn, now: () => now, certificate: async () => pem },
     bucket, store, paired: async () => pairing(["ana@example.test"]),
-    limits: { inboundPerDay: 100, knocksPerSender: 1, knocksPerDomain: 3, knocksPerDay: 50, ...limits },
+    limits: { inboundPerDay: 100, accountPerDay: 1000, knocksPerSender: 1, knocksPerDomain: 3, knocksPerDay: 50, ...limits },
     confirm: async (url) => { confirmed.push(url); },
   };
   return { w, store, confirmed };
@@ -116,6 +116,32 @@ describe("webhook", () => {
       await webhook(mail(id!, from!), w);
     }
     expect(store.items.map((f) => (f.state === "knock" && f.shown ? f.messageId : "-")).join("")).toBe("a--d-f-");
+  });
+
+  it("counts a catch-all domain's addresses as one entry for the per-address cap", async () => {
+    const { w, store } = setup({ inboundPerDay: 2 });
+    w.entries = ["example.test", "billing@other.test"];
+    for (let i = 1; i <= 3; i++) await webhook(mail(`m${i}`, "ana@example.test", {}, `a${i}@example.test`), w);
+    expect(store.items.map((f) => f.state)).toEqual(["pending_scan", "pending_scan", "held"]);
+    expect(entry("A9@Example.test", w.entries)).toBe("example.test");
+    expect(entry("x@sub.example.test", w.entries)).toBe("example.test");
+    expect(entry("billing@other.test", w.entries)).toBe("billing@other.test");
+    expect(entry("else@other.test", w.entries)).toBe("else@other.test");
+    expect(entry("x@notexample.test", w.entries)).toBe("x@notexample.test");
+  });
+
+  it("gives no fresh room to mail spread over many addresses of ours: the account's cap and the knock caps count across them", async () => {
+    const { w, store } = setup({ accountPerDay: 3, knocksPerSender: 1, knocksPerDomain: 2 });
+    for (let i = 1; i <= 5; i++) await webhook(mail(`s${i}`, "x@spam.test", {}, `a${i}@example.test`), w);
+    expect(store.items.map((f) => (f.state === "knock" ? (f.shown ? "shown" : "digest") : f.state))).toEqual(["shown", "digest", "digest", "held", "held"]);
+  });
+
+  it("counts the mail cap per address of ours, so one busy address never holds another's mail", async () => {
+    const { w, store } = setup({ inboundPerDay: 1, knocksPerSender: 1 });
+    await webhook(mail("m1", "ana@example.test", {}, "support@example.test"), w);
+    await webhook(mail("m2", "ana@example.test", {}, "billing@example.test"), w);
+    await webhook(mail("m3", "ana@example.test", {}, "SUPPORT@example.test"), w);
+    expect(store.items.map((f) => f.state)).toEqual(["pending_scan", "pending_scan", "held"]);
   });
 
   it("holds, never drops, mail past the day's cap", async () => {
