@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# chutchut's inbound mail on AWS, in eu-west-1: one S3 bucket for the raw messages, one SNS topic that tells chutchut a
+# chutchut's inbound mail on AWS, in eu-west-1: one S3 bucket for the raw messages, one DynamoDB table for what's
+# filed, one SNS topic that tells chutchut a
 # message arrived, one SES receipt rule that writes each message to the bucket and notifies the topic, and GuardDuty
 # scanning each message for malware. Idempotent: a rerun brings each piece back to what this file says. It never
 # prints an account id or an ARN, and it removes nothing.
@@ -22,6 +23,8 @@
 #     another account's SES can't write here (the confused deputy);
 #   - encrypted at rest (SSE-S3), and raw messages under in/ are deleted after 30 days: the mail a person keeps lives
 #     in chutchut's own store, not here.
+# The table holds what the webhook files (never a message's body): on-demand, encrypted, with point-in-time recovery
+# and deletion protection on, and a TTL on expiresAt that removes a knock after 30 days and a day's counter after two.
 # The topic signs with SHA256 (SignatureVersion 2), the only version chutchut's webhook accepts, and only SES from this
 # account, for this rule, may publish to it. It's encrypted with its own KMS key, which SES may use only for this rule,
 # and only this account may subscribe to it, only over HTTPS. The rule requires TLS from the sending server and asks SES for its spam
@@ -37,6 +40,7 @@ REGION=${AWS_REGION:-eu-west-1}
 NAME=${CHUTCHUT_NAME:-chutchut}
 BUCKET=${CHUTCHUT_BUCKET:?CHUTCHUT_BUCKET names the bucket}
 TOPIC=$NAME-inbound
+TABLE=$NAME-mail
 TOPIC_KEY=alias/$NAME-inbound-topic
 RULE_SET=$NAME
 RULE=$NAME-inbound
@@ -165,6 +169,23 @@ key_exists() {
   cat "$err" >&2; rm -f "$err"; exit 1
 }
 
+table() {
+  local err; err=$(mktemp)
+  if ! aws dynamodb describe-table --table-name "$TABLE" --query Table.TableName >/dev/null 2>"$err"; then
+    if ! grep -q ResourceNotFoundException "$err"; then cat "$err" >&2; rm -f "$err"; exit 1; fi
+    aws dynamodb create-table --table-name "$TABLE" --billing-mode PAY_PER_REQUEST \
+      --attribute-definitions AttributeName=pk,AttributeType=S --key-schema AttributeName=pk,KeyType=HASH \
+      --sse-specification Enabled=true --deletion-protection-enabled --query TableDescription.TableName >/dev/null
+    aws dynamodb wait table-exists --table-name "$TABLE"
+  fi
+  rm -f "$err"
+  aws dynamodb update-continuous-backups --table-name "$TABLE" \
+    --point-in-time-recovery-specification PointInTimeRecoveryEnabled=true >/dev/null
+  if [[ "$(aws dynamodb describe-time-to-live --table-name "$TABLE" --query TimeToLiveDescription.TimeToLiveStatus)" != ENABLED ]]; then
+    aws dynamodb update-time-to-live --table-name "$TABLE" --time-to-live-specification Enabled=true,AttributeName=expiresAt >/dev/null
+  fi
+}
+
 topic_key() { # prints the key's id
   local id
   if key_exists; then
@@ -234,8 +255,9 @@ scan() {
 }
 
 bucket
+table
 arn=$(topic)
 scan
 rule "$arn"
 activate
-echo "chutchut inbound: bucket $BUCKET, topic $TOPIC, rule $RULE_SET/$RULE in $REGION$([[ "$ACTIVATE" == yes ]] && echo ', active' || echo ', not active')"
+echo "chutchut inbound: bucket $BUCKET, table $TABLE, topic $TOPIC, rule $RULE_SET/$RULE in $REGION$([[ "$ACTIVATE" == yes ]] && echo ', active' || echo ', not active')"
