@@ -35,20 +35,25 @@ function mail(id: string, from: string, verdicts: Record<string, string> = {}): 
   });
 }
 
-function memory(): Store & { filed: Filed[] } {
-  const claimed = new Set<string>();
+function memory(failures = 0): Store & { items: Filed[] } {
   const counts = new Map<string, number>();
-  const filed: Filed[] = [];
+  const items: Filed[] = [];
+  let failing = failures;
   return {
-    filed,
-    async claim(id) { if (claimed.has(id)) return false; claimed.add(id); return true; },
+    items,
+    async filed(id) { return items.some((f) => f.messageId === id); },
     async bump(c) { const n = (counts.get(c) ?? 0) + 1; counts.set(c, n); return n; },
-    async file(item) { filed.push(item); },
+    async file(item) {
+      if (failing > 0) { failing -= 1; throw new Error("store down"); }
+      if (items.some((f) => f.messageId === item.messageId)) return false;
+      items.push(item);
+      return true;
+    },
   };
 }
 
-function setup(limits: Partial<Webhook["limits"]> = {}) {
-  const store = memory();
+function setup(limits: Partial<Webhook["limits"]> = {}, failures = 0) {
+  const store = memory(failures);
   const confirmed: string[] = [];
   const w: Webhook = {
     sns: { topicArn, now: () => now, certificate: async () => pem },
@@ -63,7 +68,7 @@ describe("webhook", () => {
   it("files a paired sender's mail as waiting for its malware scan, never read before", async () => {
     const { w, store } = setup();
     expect(await webhook(mail("m1", "Ana <ana@example.test>"), w)).toEqual({ status: 200, said: "filed" });
-    expect(store.filed).toEqual([{ messageId: "m1", objectKey: "in/m1", at: now.toISOString(), from: "ana@example.test", state: "pending_scan" }]);
+    expect(store.items).toEqual([{ messageId: "m1", objectKey: "in/m1", at: now.toISOString(), from: "ana@example.test", state: "pending_scan" }]);
   });
 
   it("refuses what doesn't check, and files nothing", async () => {
@@ -72,22 +77,37 @@ describe("webhook", () => {
     forged.Message = forged.Message.replace("m1", "m2");
     expect((await webhook(JSON.stringify(forged), w)).status).toBe(403);
     expect((await webhook("{}", w)).status).toBe(403);
-    expect(store.filed).toEqual([]);
+    expect(store.items).toEqual([]);
   });
 
   it("files a message SNS sends twice only once", async () => {
     const { w, store } = setup();
     await webhook(mail("m1", "ana@example.test"), w);
     expect(await webhook(mail("m1", "ana@example.test"), w)).toEqual({ status: 200, said: "filed before" });
-    expect(store.filed).toHaveLength(1);
+    expect(store.items).toHaveLength(1);
+  });
+
+  it("files a message whose first write failed when SNS sends it again: nothing is lost", async () => {
+    const { w, store } = setup({}, 1);
+    await expect(webhook(mail("m1", "ana@example.test"), w)).rejects.toThrow("store down");
+    expect(store.items).toEqual([]);
+    expect(await webhook(mail("m1", "ana@example.test"), w)).toEqual({ status: 200, said: "filed" });
+    expect(store.items.map((f) => f.messageId)).toEqual(["m1"]);
+  });
+
+  it("counts a sender's knocks case-insensitively", async () => {
+    const { w, store } = setup();
+    await webhook(mail("k1", "Spam@Stranger.test"), w);
+    await webhook(mail("k2", "spam@stranger.test"), w);
+    expect(store.items.map((f) => f.state === "knock" && f.shown)).toEqual([true, false]);
   });
 
   it("keeps a stranger's mail as a knock for 30 days, shown once a day per sender, the rest for the digest", async () => {
     const { w, store } = setup();
     await webhook(mail("k1", "bob@stranger.test"), w);
     await webhook(mail("k2", "bob@stranger.test"), w);
-    expect(store.filed.map((f) => f.state === "knock" && f.shown)).toEqual([true, false]);
-    expect(store.filed[0]).toMatchObject({ state: "knock", purgeAt: "2026-12-27T18:00:00.000Z", from: "bob@stranger.test" });
+    expect(store.items.map((f) => f.state === "knock" && f.shown)).toEqual([true, false]);
+    expect(store.items[0]).toMatchObject({ state: "knock", purgeAt: "2026-12-27T18:00:00.000Z", from: "bob@stranger.test" });
   });
 
   it("caps a sender domain's knocks, and one noisy sender never uses up others' room", async () => {
@@ -95,14 +115,14 @@ describe("webhook", () => {
     for (const [id, from] of [["a", "x@spam.test"], ["b", "x@spam.test"], ["c", "x@spam.test"], ["d", "y@spam.test"], ["e", "z@spam.test"], ["f", "u@ok.test"], ["g", "v@ok.test"]]) {
       await webhook(mail(id!, from!), w);
     }
-    expect(store.filed.map((f) => (f.state === "knock" && f.shown ? f.messageId : "-")).join("")).toBe("a--d-f-");
+    expect(store.items.map((f) => (f.state === "knock" && f.shown ? f.messageId : "-")).join("")).toBe("a--d-f-");
   });
 
   it("holds, never drops, mail past the day's cap", async () => {
     const { w, store } = setup({ inboundPerDay: 1 });
     await webhook(mail("m1", "ana@example.test"), w);
     expect(await webhook(mail("m2", "ana@example.test"), w)).toEqual({ status: 200, said: "filed" });
-    expect(store.filed[1]).toMatchObject({ messageId: "m2", state: "held", why: "over the day's mail" });
+    expect(store.items[1]).toMatchObject({ messageId: "m2", state: "held", why: "over the day's mail" });
   });
 
   it("files a virus or spam as refused and an unfinished scan as held, without counting them", async () => {
@@ -111,7 +131,7 @@ describe("webhook", () => {
     await webhook(mail("s", "ana@example.test", { spam: "FAIL" }), w);
     await webhook(mail("g", "ana@example.test", { virus: "GRAY" }), w);
     await webhook(mail("m", "ana@example.test"), w);
-    expect(store.filed.map((f) => f.state)).toEqual(["refused", "refused", "held", "pending_scan"]);
+    expect(store.items.map((f) => f.state)).toEqual(["refused", "refused", "held", "pending_scan"]);
   });
 
   it("confirms only loge's own topic subscription, at SNS in its region", async () => {
@@ -136,6 +156,6 @@ describe("webhook", () => {
   it("answers 400 for a checked message that isn't mail for this bucket", async () => {
     const { w, store } = setup();
     expect((await webhook(sns({ Message: '{"notificationType":"Bounce"}' }), w)).status).toBe(400);
-    expect(store.filed).toEqual([]);
+    expect(store.items).toEqual([]);
   });
 });

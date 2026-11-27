@@ -9,7 +9,8 @@ import { checkSns, type SnsCheck } from "./sns.js";
  *
  * - A message that doesn't check is refused (403) and nothing is filed.
  * - SNS's subscription is confirmed only for loge's own topic, at an SNS host in the topic's region.
- * - A message filed before (SNS retries) is filed once.
+ * - A message is filed once, by one conditional write keyed by its id: SNS's retry of a message already filed is told
+ *   so, and a write that failed leaves nothing behind, so the retry files it. Nothing is claimed before it's filed.
  * - **Holds, not drops:** past a cap, mail is filed and held, never lost. A knock past its caps is kept for the day's
  *   digest, not shown on its own.
  * - A knock is kept 30 days, then purged, and never sent to the AI unless the owner hands it to an agent.
@@ -39,11 +40,13 @@ export type Filed = {
 
 /** Where filed mail and the day's counts live. A real store is its own change; tests use memory. */
 export interface Store {
-  /** True the first time a message id is claimed, false after. */
-  claim(messageId: string): Promise<boolean>;
+  /** Whether a message id is filed already: a read, so a retry of a filed message counts against no cap. */
+  filed(messageId: string): Promise<boolean>;
   /** Adds one to a day's counter and answers the new count. */
   bump(counter: string): Promise<number>;
-  file(item: Filed): Promise<void>;
+  /** Files an item only if its message id isn't filed yet (one conditional write): true if this call filed it. A
+   *  failure throws, and files nothing. */
+  file(item: Filed): Promise<boolean>;
 }
 
 export interface Webhook {
@@ -91,13 +94,14 @@ export async function webhook(body: string, w: Webhook): Promise<Answer> {
   if (m.Type === "UnsubscribeConfirmation") return { status: 200, said: "noted" };
   const r = route(m.Message, await w.paired(), w.bucket);
   if (r === undefined) return { status: 400, said: "not a received message for this bucket" };
-  if (!(await w.store.claim(r.messageId))) return { status: 200, said: "filed before" };
+  if (await w.store.filed(r.messageId)) return { status: 200, said: "filed before" };
   const now = w.sns.now();
   const at = now.toISOString();
   const day = at.slice(0, 10);
   const base = { messageId: r.messageId, objectKey: r.objectKey, at };
-  await w.store.file(await place(r, base, day, now, w));
-  return { status: 200, said: "filed" };
+  // A failure here throws: the webhook answers 500, SNS sends it again, and nothing was filed in between.
+  const first = await w.store.file(await place(r, base, day, now, w));
+  return { status: 200, said: first ? "filed" : "filed before" };
 }
 
 async function place(r: Route, base: { messageId: string; objectKey: string; at: string }, day: string, now: Date, w: Webhook): Promise<Filed> {
@@ -111,8 +115,9 @@ async function place(r: Route, base: { messageId: string; objectKey: string; at:
   if (r.to === "paired") return { ...base, ...from, state: "pending_scan" };
   // A knock: shown only while it's within its sender's, its domain's and the day's caps. A knock past one cap isn't
   // counted against the next, so one noisy sender can't push other strangers' knocks into the digest.
-  const sender = sent ?? "(no sender)";
-  const domain = sent?.split("@")[1] ?? "(no sender)";
+  // Counted case-insensitively, so Spam@ and spam@ are one sender.
+  const sender = sent?.toLowerCase() ?? "(no sender)";
+  const domain = sender.split("@")[1] ?? "(no sender)";
   const shown =
     (await w.store.bump(`${day}:knock:sender:${sender}`)) <= w.limits.knocksPerSender &&
     (await w.store.bump(`${day}:knock:domain:${domain}`)) <= w.limits.knocksPerDomain &&
