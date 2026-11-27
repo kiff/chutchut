@@ -1,6 +1,7 @@
 import {
   ConditionalCheckFailedException, GetItemCommand, PutItemCommand, ScanCommand, UpdateItemCommand, type AttributeValue, type DynamoDBClient,
 } from "@aws-sdk/client-dynamodb";
+import type { Knock, KnockShelf } from "./knocks.js";
 import type { Shelf } from "./reader.js";
 import type { Filed, Store } from "./webhook.js";
 
@@ -112,6 +113,30 @@ export function dynamoShelf(client: Pick<DynamoDBClient, "send">, table: string)
         start = page.LastEvaluatedKey;
       } while (start !== undefined);
       return ids;
+    },
+  };
+}
+
+/** The knocks on the same table: a filtered scan, every page. At volume this becomes an index on state. */
+export function dynamoKnocks(client: Pick<DynamoDBClient, "send">, table: string): KnockShelf {
+  return {
+    async knocks() {
+      const out: Knock[] = [];
+      let start: Record<string, AttributeValue> | undefined;
+      do {
+        const page = await client.send(new ScanCommand({
+          TableName: table, FilterExpression: "#s = :knock", ProjectionExpression: "messageId, #at, purgeAt, #from, shown",
+          ExpressionAttributeNames: { "#s": "state", "#at": "at", "#from": "from" },
+          ExpressionAttributeValues: { ":knock": { S: "knock" } }, ExclusiveStartKey: start,
+        }));
+        for (const i of page.Items ?? []) {
+          const messageId = i.messageId?.S, at = i.at?.S, purgeAt = i.purgeAt?.S;
+          if (messageId === undefined || at === undefined || purgeAt === undefined) continue;
+          out.push({ messageId, at, purgeAt, shown: i.shown?.S === "yes", ...(i.from?.S !== undefined ? { from: i.from.S } : {}) });
+        }
+        start = page.LastEvaluatedKey;
+      } while (start !== undefined);
+      return out;
     },
   };
 }
