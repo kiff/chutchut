@@ -137,6 +137,10 @@ done
 ACTIVATE=${LOGE_ACTIVATE:-}
 [[ -z "$ACTIVATE" || "$ACTIVATE" == yes ]] || { echo "LOGE_ACTIVATE is yes or unset" >&2; exit 2; }
 
+# A failure inside $(…) stops the run too, so a topic, key or policy that wasn't set is never reported as done. That needs
+# bash 4.4 or later (macOS's own /bin/bash is 3.2: use Homebrew's).
+if ! shopt -s inherit_errexit 2>/dev/null; then echo "deploy/aws.sh needs bash 4.4 or later" >&2; exit 2; fi
+# (Only `up` calls AWS, so only `up` needs it: `policies` and the checks above run on any bash.)
 ACCOUNT=$(aws sts get-caller-identity --query Account)
 
 bucket() {
@@ -152,9 +156,20 @@ bucket() {
   aws s3api put-bucket-policy --bucket "$BUCKET" --policy "$(bucket_policy "$ACCOUNT")"
 }
 
+# Whether the key's alias exists: a missing alias is "no", and any other error stops the run, so a failed read never
+# makes a second key.
+key_exists() {
+  local err; err=$(mktemp)
+  if aws kms describe-key --key-id "$TOPIC_KEY" --query KeyMetadata.KeyId >/dev/null 2>"$err"; then rm -f "$err"; return 0; fi
+  if grep -q NotFoundException "$err"; then rm -f "$err"; return 1; fi
+  cat "$err" >&2; rm -f "$err"; exit 1
+}
+
 topic_key() { # prints the key's id
-  local id; id=$(aws kms describe-key --key-id "$TOPIC_KEY" --query KeyMetadata.KeyId 2>/dev/null || true)
-  if [[ -z "$id" || "$id" == None ]]; then
+  local id
+  if key_exists; then
+    id=$(aws kms describe-key --key-id "$TOPIC_KEY" --query KeyMetadata.KeyId)
+  else
     id=$(aws kms create-key --description "$NAME inbound topic" --query KeyMetadata.KeyId)
     aws kms create-alias --alias-name "$TOPIC_KEY" --target-key-id "$id"
   fi
@@ -185,14 +200,18 @@ rule() { # topic-arn
   else
     aws ses create-receipt-rule --rule-set-name "$RULE_SET" --rule "$body"
   fi
-  if [[ "$ACTIVATE" == yes ]]; then
-    local active; active=$(aws ses describe-active-receipt-rule-set --query Metadata.Name 2>/dev/null || true)
-    if [[ -n "$active" && "$active" != None && "$active" != "$RULE_SET" ]]; then
-      echo "another SES rule set is active in $REGION: activating $RULE_SET would stop the mail it receives. Not activated." >&2
-      exit 3
-    fi
-    aws ses set-active-receipt-rule-set --rule-set-name "$RULE_SET"
+}
+
+# Last, once the bucket, the topic, the scan and the rule are all in place: nothing arrives before it can be scanned.
+activate() {
+  [[ "$ACTIVATE" == yes ]] || return 0
+  # A failed read stops the run (errexit): it never counts as "none active".
+  local active; active=$(aws ses describe-active-receipt-rule-set --query Metadata.Name)
+  if [[ -n "$active" && "$active" != None && "$active" != "$RULE_SET" ]]; then
+    echo "another SES rule set is active in $REGION: activating $RULE_SET would stop the mail it receives. Not activated." >&2
+    exit 3
   fi
+  aws ses set-active-receipt-rule-set --rule-set-name "$RULE_SET"
 }
 
 scan() {
@@ -216,6 +235,7 @@ scan() {
 
 bucket
 arn=$(topic)
-rule "$arn"
 scan
+rule "$arn"
+activate
 echo "loge inbound: bucket $BUCKET, topic $TOPIC, rule $RULE_SET/$RULE in $REGION$([[ "$ACTIVATE" == yes ]] && echo ', active' || echo ', not active')"
