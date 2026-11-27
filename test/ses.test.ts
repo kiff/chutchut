@@ -27,12 +27,12 @@ function received(over: { verdicts?: Record<string, string>; headers?: [string, 
 
 describe("ses", () => {
   it("sends a paired sender's clean, DMARC-passing mail to the paired door", () => {
-    expect(route(received(), paired, bucket)).toEqual({ to: "paired", messageId: "m-1", objectKey: "in/m-1", recipient: "support@example.test", from: "ana@example.test" });
+    expect(route(received(), paired, bucket)).toEqual({ to: "paired", messageId: "m-1", objectKey: "in/m-1", recipient: "support@example.test", from: "ana@example.test", auth: { spf: "pass", dkim: "pass", dmarc: "pass" } });
   });
 
-  it("makes it knock when DMARC didn't pass, or spam couldn't be judged", () => {
+  it("makes it knock when DMARC didn't pass, or spam couldn't be judged, and sends no sender check on", () => {
     for (const verdicts of <Record<string, string>[]>[{ dmarc: "FAIL" }, { dmarc: "GRAY" }, { dmarc: "PROCESSING_FAILED" }, { spam: "GRAY" }]) {
-      expect(route(received({ verdicts }), paired, bucket)).toMatchObject({ to: "knock" });
+      expect(route(received({ verdicts }), paired, bucket)).toMatchObject({ to: "knock", auth: null });
     }
   });
 

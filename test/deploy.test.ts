@@ -90,6 +90,34 @@ describe("deploy", () => {
     expect(policies.lambda_trust.Statement[0].Principal).toEqual({ Service: "lambda.amazonaws.com" });
   });
 
+  it("as tafs's provider: no kept/, the reader reads only the webhook's secret, the read API only its key, the table and in/", () => {
+    const tafs = JSON.parse(execFileSync("bash", ["deploy/aws.sh", "policies"], {
+      env: { ...process.env, CHUTCHUT_BUCKET: "chutchut-inbound-test", CHUTCHUT_MODE: "tafs", AWS_REGION: "eu-west-1" },
+    }).toString());
+    const actions = (p: { Statement: { Action: string | string[]; Resource: string }[] }) =>
+      p.Statement.filter((s) => !String(s.Resource).includes(":logs:")).flatMap((s) => ([] as string[]).concat(s.Action).map((a) => `${a} ${s.Resource}`)).sort();
+    const table = "arn:aws:dynamodb:eu-west-1:000000000000:table/chutchut-mail";
+    expect(actions(tafs.reader)).toEqual([
+      `dynamodb:GetItem ${table}`, `dynamodb:UpdateItem ${table}`, "sns:Publish arn:aws:sns:eu-west-1:000000000000:chutchut-alerts",
+      "ssm:GetParameter arn:aws:ssm:eu-west-1:000000000000:parameter/chutchut/webhook-secret",
+    ]);
+    expect(actions(tafs.provider)).toEqual([
+      `dynamodb:GetItem ${table}`, "s3:GetObject arn:aws:s3:::chutchut-inbound-test/in/*", "ssm:GetParameter arn:aws:ssm:eu-west-1:000000000000:parameter/chutchut/read-key",
+    ]);
+    expect(policies).not.toHaveProperty("provider");
+  });
+
+  it("refuses tafs mode's settings that aren't tafs's webhook or SSM names, before calling AWS", () => {
+    const run = (env: Record<string, string>) => spawnSync("bash", ["deploy/aws.sh", "up"], { env: {
+      PATH: "/usr/bin:/bin", CHUTCHUT_BUCKET: "b", CHUTCHUT_RECIPIENTS: "kiff.test", CHUTCHUT_MODE: "tafs",
+      CHUTCHUT_TAFS_WEBHOOK: "https://tafs.example.test/v1/doors/email", CHUTCHUT_WEBHOOK_SECRET_PARAM: "/c/s", CHUTCHUT_READ_KEY_PARAM: "/c/k", ...env,
+    } }).status;
+    expect(run({ CHUTCHUT_TAFS_WEBHOOK: "http://tafs.example.test/v1/doors/email" })).toBe(2);
+    expect(run({ CHUTCHUT_TAFS_WEBHOOK: "https://tafs.example.test/elsewhere" })).toBe(2);
+    expect(run({ CHUTCHUT_READ_KEY_PARAM: "c/k" })).toBe(2);
+    expect(run({ CHUTCHUT_MODE: "other" })).toBe(2);
+  });
+
   it("sends the reader GuardDuty's scan results for this bucket only", () => {
     expect(policies.scan_rule).toEqual({
       source: ["aws.guardduty"], "detail-type": ["GuardDuty Malware Protection Object Scan Result"],
@@ -128,7 +156,7 @@ exit 0
 `);
     chmodSync(join(dir, "aws"), 0o755);
     // Stand-in built functions, so the stand-in run needs no build.
-    for (const f of ["webhook", "reader", "stale"]) writeFileSync(join(dir, `${f}.mjs`), "export const handler = () => {};\n");
+    for (const f of ["webhook", "reader", "stale", "provider"]) writeFileSync(join(dir, `${f}.mjs`), "export const handler = () => {};\n");
     const run = spawnSync("bash", ["deploy/aws.sh", "up"], {
       env: {
         PATH: `${dir}:${process.env.PATH}`, CHUTCHUT_BUCKET: "chutchut-inbound-test", CHUTCHUT_RECIPIENTS: "support@example.test",

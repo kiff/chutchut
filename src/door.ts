@@ -35,6 +35,14 @@ export function pairing(addresses: Iterable<string>): Pairing {
   return new Set([...addresses].map(normalize)) as unknown as Pairing;
 }
 
+/**
+ * Every proven sender, for chutchut as tafs cloud's mail provider: tafs keeps the pairing, so chutchut sends every
+ * proven sender's mail on and lets tafs decide key or knock. Proof is still required: an unproven sender still knocks.
+ */
+export function anyone(): Pairing {
+  return { has: () => true, size: Infinity, [Symbol.iterator]: function* () {} } as unknown as Pairing;
+}
+
 /** An address as pairing keys it: trimmed and lower-cased (a domain is case-insensitive, and nearly every mail server treats the mailbox name so too). */
 export function normalize(address: string): string {
   return address.trim().toLowerCase();
