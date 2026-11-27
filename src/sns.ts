@@ -1,7 +1,7 @@
 import { createPublicKey, verify } from "node:crypto";
 
 /**
- * An Amazon SNS message posted to loge's webhook, checked before anything in it is read: from the one topic loge
+ * An Amazon SNS message posted to chutchut's webhook, checked before anything in it is read: from the one topic chutchut
  * subscribed to, signed by SNS with a certificate fetched only from an SNS host, and fresh. Anything else is refused,
  * and a refused message is never confirmed, stored or passed on.
  */
@@ -20,7 +20,7 @@ export interface SnsMessage {
 }
 
 export interface SnsCheck {
-  /** The only topic accepted: loge's own inbound topic. */
+  /** The only topic accepted: chutchut's own inbound topic. */
   topicArn: string;
   /** Fetches a signing certificate (PEM) by URL. Only ever called with a URL `certificateURL` accepted. */
   certificate: (url: string) => Promise<string>;
@@ -74,7 +74,7 @@ export async function checkSns(body: string, check: SnsCheck): Promise<SnsVerdic
   }
   if (m.Subject !== undefined && typeof m.Subject !== "string") return { ok: false, why: "a Subject that isn't text" };
   if (m.TopicArn !== check.topicArn) return { ok: false, why: "another topic" };
-  // Version 1 signs with SHA1, which loge doesn't accept: the topic is set to version 2.
+  // Version 1 signs with SHA1, which chutchut doesn't accept: the topic is set to version 2.
   if (m.SignatureVersion !== "2") return { ok: false, why: "not signature version 2" };
   if (typeof m.SigningCertURL !== "string" || !certificateURL(m.SigningCertURL)) return { ok: false, why: "a certificate from elsewhere" };
   const at = Date.parse(m.Timestamp);

@@ -1,0 +1,1 @@
+- **loge is now chutchut.** The package is `@kiff/chutchut`, the deploy settings are `CHUTCHUT_*` (`CHUTCHUT_BUCKET`, `CHUTCHUT_RECIPIENTS`, `CHUTCHUT_NAME`, `CHUTCHUT_ACTIVATE`), and the AWS names default to `chutchut` (`chutchut-inbound`, the rule set `chutchut`). Entries written before the rename still say loge.

@@ -6,8 +6,8 @@ import { subscribeURL, webhook, type Filed, type Store, type Webhook } from "../
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const pem = publicKey.export({ type: "spki", format: "pem" }).toString();
-const topicArn = "arn:aws:sns:eu-west-1:000000000000:loge-inbound";
-const bucket = "loge-inbound-test";
+const topicArn = "arn:aws:sns:eu-west-1:000000000000:chutchut-inbound";
+const bucket = "chutchut-inbound-test";
 const now = new Date("2026-11-27T18:00:00Z");
 
 function sns(fields: Partial<SnsMessage>): string {
@@ -134,7 +134,7 @@ describe("webhook", () => {
     expect(store.items.map((f) => f.state)).toEqual(["refused", "refused", "held", "pending_scan"]);
   });
 
-  it("confirms only loge's own topic subscription, at SNS in its region", async () => {
+  it("confirms only chutchut's own topic subscription, at SNS in its region", async () => {
     const { w, confirmed } = setup();
     const good = `https://sns.eu-west-1.amazonaws.com/?Action=ConfirmSubscription&TopicArn=${encodeURIComponent(topicArn)}&Token=t1`;
     expect(await webhook(sns({ Type: "SubscriptionConfirmation", SubscribeURL: good, Token: "t1" }), w)).toEqual({ status: 200, said: "subscribed" });

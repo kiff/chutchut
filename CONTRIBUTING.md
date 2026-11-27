@@ -1,6 +1,6 @@
-# Contributing to loge
+# Contributing to chutchut
 
-loge is source-available under [FSL-1.1-ALv2](LICENSE.md), not open source.
+chutchut is source-available under [FSL-1.1-ALv2](LICENSE.md), not open source.
 
 ## Rules every change follows
 

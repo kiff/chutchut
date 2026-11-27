@@ -3,12 +3,12 @@ import { route, type Route } from "./ses.js";
 import { checkSns, type SnsCheck } from "./sns.js";
 
 /**
- * loge's webhook: one POST from SNS, checked, routed and filed. Nothing in a message is read here beyond SES's
+ * chutchut's webhook: one POST from SNS, checked, routed and filed. Nothing in a message is read here beyond SES's
  * verdicts and its From: a message's body and attachments are read later, and only once GuardDuty has tagged it
  * NO_THREATS_FOUND (`pending_scan` until then).
  *
  * - A message that doesn't check is refused (403) and nothing is filed.
- * - SNS's subscription is confirmed only for loge's own topic, at an SNS host in the topic's region.
+ * - SNS's subscription is confirmed only for chutchut's own topic, at an SNS host in the topic's region.
  * - A message is filed once, by one conditional write keyed by its id: SNS's retry of a message already filed is told
  *   so, and a write that failed leaves nothing behind, so the retry files it. Nothing is claimed before it's filed.
  * - **Holds, not drops:** past a cap, mail is filed and held, never lost. A knock past its caps is kept for the day's

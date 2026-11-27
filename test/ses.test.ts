@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { pairing } from "../src/door.js";
 import { route } from "../src/ses.js";
 
-const bucket = "loge-inbound-test";
+const bucket = "chutchut-inbound-test";
 const paired = pairing(["ana@example.test"]);
 
 function received(over: { verdicts?: Record<string, string>; headers?: [string, string][]; bucket?: string; type?: string; sesFrom?: unknown; truncated?: boolean } = {}): string {
