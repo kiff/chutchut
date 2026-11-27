@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { dynamoStore } from "../src/dynamo.js";
 
 const now = () => new Date("2026-11-27T18:00:00Z");
+const purgeAt = "2026-12-27T18:00:00.000Z";
 
 /** A stand-in for DynamoDB that keeps items in memory and honours the conditions the store sends. */
 function fake(fail?: string) {
@@ -40,9 +41,9 @@ describe("dynamo store", () => {
     const db = fake();
     const store = dynamoStore(db, "chutchut-mail", now);
     expect(await store.filed("m1")).toBe(false);
-    expect(await store.file({ messageId: "m1", objectKey: "in/m1", at: now().toISOString(), from: "ana@example.test", state: "pending_scan" })).toBe(true);
+    expect(await store.file({ messageId: "m1", objectKey: "in/m1", at: now().toISOString(), purgeAt, from: "ana@example.test", state: "pending_scan" })).toBe(true);
     expect(await store.filed("m1")).toBe(true);
-    expect(await store.file({ messageId: "m1", objectKey: "in/m1", at: now().toISOString(), state: "pending_scan" })).toBe(false);
+    expect(await store.file({ messageId: "m1", objectKey: "in/m1", at: now().toISOString(), purgeAt, state: "pending_scan" })).toBe(false);
     expect(db.items.get("msg#m1")).toMatchObject({ state: { S: "pending_scan" }, from: { S: "ana@example.test" } });
     const puts = db.sent.filter((c) => c instanceof PutItemCommand) as PutItemCommand[];
     expect(puts.every((p) => p.input.ConditionExpression === "attribute_not_exists(pk)")).toBe(true);
@@ -54,14 +55,14 @@ describe("dynamo store", () => {
     expect((db.sent[0] as GetItemCommand).input).toMatchObject({ ConsistentRead: true, Key: { pk: { S: "msg#m1" } } });
   });
 
-  it("lets a knock expire at its purgeAt, and keeps why mail was held or refused", async () => {
+  it("lets every filed item expire at its purgeAt, and keeps why mail was held or refused", async () => {
     const db = fake();
     const store = dynamoStore(db, "t", now);
-    await store.file({ messageId: "k1", objectKey: "in/k1", at: now().toISOString(), state: "knock", shown: false, purgeAt: "2026-12-27T18:00:00.000Z" });
-    await store.file({ messageId: "h1", objectKey: "in/h1", at: now().toISOString(), state: "held", why: "over the day's mail" });
+    await store.file({ messageId: "k1", objectKey: "in/k1", at: now().toISOString(), purgeAt, state: "knock", shown: false });
+    await store.file({ messageId: "h1", objectKey: "in/h1", at: now().toISOString(), purgeAt, state: "held", why: "over the day's mail" });
     expect(db.items.get("msg#k1")).toMatchObject({ shown: { S: "no" }, expiresAt: { N: String(Date.parse("2026-12-27T18:00:00Z") / 1000) } });
     expect(db.items.get("msg#h1")).toMatchObject({ why: { S: "over the day's mail" } });
-    expect(db.items.get("msg#h1")).not.toHaveProperty("expiresAt");
+    expect(db.items.get("msg#h1")).toMatchObject({ expiresAt: { N: String(Date.parse(purgeAt) / 1000) } });
   });
 
   it("counts a day's counter up, expiring two days after it was first counted", async () => {
@@ -74,6 +75,6 @@ describe("dynamo store", () => {
 
   it("passes on a failure, so the webhook answers 500 and SNS sends it again", async () => {
     const store = dynamoStore(fake("PutItemCommand"), "t", now);
-    await expect(store.file({ messageId: "m1", objectKey: "in/m1", at: now().toISOString(), state: "pending_scan" })).rejects.toThrow("dynamo down");
+    await expect(store.file({ messageId: "m1", objectKey: "in/m1", at: now().toISOString(), purgeAt, state: "pending_scan" })).rejects.toThrow("dynamo down");
   });
 });

@@ -7,8 +7,8 @@ import type { Filed, Store } from "./webhook.js";
  *
  * - `file` is one conditional put (`attribute_not_exists(pk)`), so a message is filed once, and a put that fails
  *   leaves nothing for SNS's retry to trip on.
- * - A knock's item expires at its `purgeAt` (the table's TTL on `expiresAt`). DynamoDB removes expired items within
- *   about two days, so whatever lists knocks also leaves out any past its `purgeAt`.
+ * - Every filed item expires at its `purgeAt`, 30 days on (the table's TTL on `expiresAt`). DynamoDB removes expired
+ *   items within about two days, so whatever lists them also leaves out any past its `purgeAt`.
  * - A day's counter expires two days after it's first counted.
  * - Nothing here stores a message's body: only what `Filed` holds (ids, the sender's address, the state).
  */
@@ -40,13 +40,10 @@ export function dynamoStore(client: Pick<DynamoDBClient, "send">, table: string,
       const fields: Record<string, { S: string } | { N: string }> = {
         pk: { S: `msg#${item.messageId}` },
         messageId: { S: item.messageId }, objectKey: { S: item.objectKey }, at: { S: item.at }, state: { S: item.state },
+        purgeAt: { S: item.purgeAt }, expiresAt: { N: String(Math.floor(Date.parse(item.purgeAt) / 1000)) },
       };
       if (item.from !== undefined) fields.from = { S: item.from };
-      if (item.state === "knock") {
-        fields.shown = { S: item.shown ? "yes" : "no" };
-        fields.purgeAt = { S: item.purgeAt };
-        fields.expiresAt = { N: String(Math.floor(Date.parse(item.purgeAt) / 1000)) };
-      }
+      if (item.state === "knock") fields.shown = { S: item.shown ? "yes" : "no" };
       if (item.state === "held" || item.state === "refused") fields.why = { S: item.why };
       try {
         await client.send(new PutItemCommand({ TableName: table, Item: fields, ConditionExpression: "attribute_not_exists(pk)" }));

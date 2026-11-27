@@ -13,7 +13,9 @@ import { checkSns, type SnsCheck } from "./sns.js";
  *   so, and a write that failed leaves nothing behind, so the retry files it. Nothing is claimed before it's filed.
  * - **Holds, not drops:** past a cap, mail is filed and held, never lost. A knock past its caps is kept for the day's
  *   digest, not shown on its own.
- * - A knock is kept 30 days, then purged, and never sent to the AI unless the owner hands it to an agent.
+ * - Everything filed here is kept 30 days, then purged (`purgeAt`): a knock, refused or held mail, and mail still
+ *   waiting for its scan. No sender's address is kept for good. A knock is never sent to the AI unless the owner hands
+ *   it to an agent. (Mail a paired sender sent, once scanned clean, is kept as the owner's mail by the reader.)
  */
 export interface Limits {
   /** Messages a day for this address, before the rest are held. */
@@ -30,10 +32,12 @@ export type Filed = {
   messageId: string;
   objectKey: string;
   at: string;
+  /** When it's deleted: 30 days after it was filed. */
+  purgeAt: string;
   from?: string;
 } & (
   | { state: "pending_scan" } // paired: read once GuardDuty says NO_THREATS_FOUND
-  | { state: "knock"; shown: boolean; purgeAt: string }
+  | { state: "knock"; shown: boolean }
   | { state: "held"; why: string }
   | { state: "refused"; why: string }
 );
@@ -98,13 +102,13 @@ export async function webhook(body: string, w: Webhook): Promise<Answer> {
   const now = w.sns.now();
   const at = now.toISOString();
   const day = at.slice(0, 10);
-  const base = { messageId: r.messageId, objectKey: r.objectKey, at };
+  const base = { messageId: r.messageId, objectKey: r.objectKey, at, purgeAt: new Date(now.getTime() + 30 * DAY_MS).toISOString() };
   // A failure here throws: the webhook answers 500, SNS sends it again, and nothing was filed in between.
-  const first = await w.store.file(await place(r, base, day, now, w));
+  const first = await w.store.file(await place(r, base, day, w));
   return { status: 200, said: first ? "filed" : "filed before" };
 }
 
-async function place(r: Route, base: { messageId: string; objectKey: string; at: string }, day: string, now: Date, w: Webhook): Promise<Filed> {
+async function place(r: Route, base: { messageId: string; objectKey: string; at: string; purgeAt: string }, day: string, w: Webhook): Promise<Filed> {
   if (r.to === "refused") return { ...base, state: "refused", why: r.why };
   if (r.to === "held") return { ...base, state: "held", why: r.why };
   const sent = "from" in r ? r.from : undefined;
@@ -122,5 +126,5 @@ async function place(r: Route, base: { messageId: string; objectKey: string; at:
     (await w.store.bump(`${day}:knock:sender:${sender}`)) <= w.limits.knocksPerSender &&
     (await w.store.bump(`${day}:knock:domain:${domain}`)) <= w.limits.knocksPerDomain &&
     (await w.store.bump(`${day}:knock`)) <= w.limits.knocksPerDay;
-  return { ...base, ...from, state: "knock", shown, purgeAt: new Date(now.getTime() + 30 * DAY_MS).toISOString() };
+  return { ...base, ...from, state: "knock", shown };
 }

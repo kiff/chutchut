@@ -1,0 +1,1 @@
+- **Nothing the webhook files is kept for good.** Refused and held mail, and mail still waiting for its malware scan, are now deleted 30 days after they arrive, as knocks already were. A refused message never keeps its sender's address.
