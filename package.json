@@ -11,9 +11,10 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "build": "esbuild src/lambda/webhook.ts src/lambda/reader.ts src/lambda/stale.ts --bundle --platform=node --target=node22 --format=esm --outdir=dist --out-extension:.js=.mjs --external:@aws-sdk/* --sourcemap"
+    "build": "esbuild src/lambda/webhook.ts src/lambda/reader.ts src/lambda/stale.ts src/lambda/provider.ts --bundle --platform=node --target=node22 --format=esm --outdir=dist --out-extension:.js=.mjs --external:@aws-sdk/* --sourcemap"
   },
   "devDependencies": {
+    "@types/mailparser": "3.9.0",
     "@types/node": "26.6.6",
     "esbuild": "0.28.2",
     "typescript": "7.0.2",
@@ -22,6 +23,8 @@
   "dependencies": {
     "@aws-sdk/client-dynamodb": "3.1175.0",
     "@aws-sdk/client-s3": "3.1175.0",
-    "@aws-sdk/client-sns": "3.1175.0"
+    "@aws-sdk/client-sns": "3.1175.0",
+    "@aws-sdk/client-ssm": "3.1175.0",
+    "mailparser": "3.14.3"
   }
 }

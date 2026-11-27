@@ -11,7 +11,12 @@ import { mailboxes, sender } from "./from.js";
  * - Otherwise the door decides, and only mail whose DMARC passed can be a paired sender's.
  */
 /** `recipient` is the address of ours it came to (SES's receipt.recipients, the first, lower-cased): caps count per address. */
-export type Route = { to: Door; messageId: string; objectKey: string; recipient: string; from: string | undefined }
+/**
+ * SES's sender checks as tafs's door reads them ("pass", "fail", …), kept only for a sender proven here.
+ */
+export interface Auth { spf: string; dkim: string; dmarc: string }
+
+export type Route = { to: Door; messageId: string; objectKey: string; recipient: string; from: string | undefined; auth: Auth | null }
   | { to: "held" | "refused"; messageId: string; objectKey: string; recipient: string; why: string };
 
 interface Verdict { status?: string }
@@ -68,5 +73,9 @@ export function route(message: string, paired: Pairing, bucket: string): Route |
   const from = read !== undefined && sesOne?.length === 1 && sesOne[0]!.toLowerCase() === read.toLowerCase() ? read : undefined;
   // Spam that SES couldn't judge may still knock, but never passes as a paired sender's.
   const aligned = status(n.receipt?.dmarcVerdict) === "PASS" && spam === "PASS";
-  return { to: from === undefined ? "knock" : door({ address: from, dmarcAligned: aligned }, paired), messageId, objectKey, recipient, from };
+  const lower = (v: Verdict | undefined) => status(v).toLowerCase();
+  // Sent on only for a sender proven here (one From read as SES reads it, DMARC passed, spam clean): anything else
+  // reaches tafs with none, so it can only knock there, never be paired on a looser reading.
+  const auth = from === undefined || !aligned ? null : { spf: lower(n.receipt?.spfVerdict), dkim: lower(n.receipt?.dkimVerdict), dmarc: lower(n.receipt?.dmarcVerdict) };
+  return { to: from === undefined ? "knock" : door({ address: from, dmarcAligned: aligned }, paired), messageId, objectKey, recipient, from, auth };
 }

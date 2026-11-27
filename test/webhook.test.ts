@@ -68,7 +68,7 @@ describe("webhook", () => {
   it("files a paired sender's mail as waiting for its malware scan, never read before", async () => {
     const { w, store } = setup();
     expect(await webhook(mail("m1", "Ana <ana@example.test>"), w)).toEqual({ status: 200, said: "filed" });
-    expect(store.items).toEqual([{ messageId: "m1", objectKey: "in/m1", at: now.toISOString(), purgeAt: "2026-12-27T18:00:00.000Z", from: "ana@example.test", state: "pending_scan" }]);
+    expect(store.items).toEqual([{ messageId: "m1", objectKey: "in/m1", at: now.toISOString(), purgeAt: "2026-12-27T18:00:00.000Z", from: "ana@example.test", auth: { spf: "pass", dkim: "pass", dmarc: "pass" }, recipient: "support@example.test", state: "pending_scan" }]);
   });
 
   it("refuses what doesn't check, and files nothing", async () => {

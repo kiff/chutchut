@@ -47,6 +47,8 @@ export function dynamoStore(client: Pick<DynamoDBClient, "send">, table: string,
         purgeAt: { S: item.purgeAt }, expiresAt: { N: String(Math.floor(Date.parse(item.purgeAt) / 1000)) },
       };
       if (item.from !== undefined) fields.from = { S: item.from };
+      if (item.auth !== undefined) fields.auth = { S: JSON.stringify(item.auth) };
+      if (item.recipient !== undefined) fields.recipient = { S: item.recipient };
       if (item.state === "knock") fields.shown = { S: item.shown ? "yes" : "no" };
       if (item.state === "held" || item.state === "refused") fields.why = { S: item.why };
       try {
@@ -68,12 +70,14 @@ export function dynamoShelf(client: Pick<DynamoDBClient, "send">, table: string)
   const key = (id: string) => ({ pk: { S: `msg#${id}` } });
   // "state" and "from" are DynamoDB reserved words, so they're always named through #s and #from.
   async function change(id: string, update: string, values: Record<string, { S: string }>, condition: string): Promise<boolean> {
-    const names: Record<string, string> = { "#s": "state" };
+    // DynamoDB refuses a name the expressions don't use, so each is named only where it's used.
+    const names: Record<string, string> = {};
+    if (`${update} ${condition}`.includes("#s")) names["#s"] = "state";
     if (update.includes("#from")) names["#from"] = "from";
     try {
       await client.send(new UpdateItemCommand({
         TableName: table, Key: key(id), UpdateExpression: update, ConditionExpression: condition,
-        ExpressionAttributeNames: names, ExpressionAttributeValues: values,
+        ...(Object.keys(names).length > 0 ? { ExpressionAttributeNames: names } : {}), ExpressionAttributeValues: values,
       }));
       return true;
     } catch (e) {
@@ -84,12 +88,13 @@ export function dynamoShelf(client: Pick<DynamoDBClient, "send">, table: string)
   return {
     async get(id) {
       const got = await client.send(new GetItemCommand({
-        TableName: table, Key: key(id), ProjectionExpression: "#s, #at",
+        TableName: table, Key: key(id), ProjectionExpression: "#s, #at, shown, clean, notified",
         ExpressionAttributeNames: { "#s": "state", "#at": "at" }, ConsistentRead: true,
       }));
       const state = got.Item?.state?.S;
       const at = got.Item?.at?.S;
-      return state === undefined || at === undefined ? undefined : { state, at };
+      if (state === undefined || at === undefined) return undefined;
+      return { state, at, shown: got.Item?.shown?.S === "yes", clean: got.Item?.clean?.S === "yes", notified: got.Item?.notified?.S === "yes" };
     },
     // Kept mail loses its expiry: it stays until the owner deletes it.
     keep: (id, keptKey) => change(id, "SET #s = :mail, objectKey = :kept REMOVE expiresAt, purgeAt",
@@ -98,6 +103,12 @@ export function dynamoShelf(client: Pick<DynamoDBClient, "send">, table: string)
     refuse: (id, why) => change(id, "SET #s = :refused, why = :why REMOVE #from, shown",
       { ":refused": { S: "refused" }, ":why": { S: why }, ":pending": { S: "pending_scan" }, ":knock": { S: "knock" }, ":held": { S: "held" } },
       "#s IN (:pending, :knock, :held)"),
+    // tafs mode: mail a proven sender sent becomes clean, a shown knock is marked clean; both keep their expiry.
+    async clear(id) {
+      if (await change(id, "SET #s = :clean, clean = :yes", { ":clean": { S: "clean" }, ":yes": { S: "yes" }, ":pending": { S: "pending_scan" } }, "#s = :pending")) return true;
+      return change(id, "SET clean = :yes", { ":yes": { S: "yes" }, ":knock": { S: "knock" }, ":shown": { S: "yes" } }, "#s = :knock AND shown = :shown");
+    },
+    notified: (id) => change(id, "SET notified = :yes", { ":yes": { S: "yes" } }, "attribute_not_exists(notified)"),
     hold: (id, why) => change(id, "SET #s = :held, why = :why",
       { ":held": { S: "held" }, ":why": { S: why }, ":pending": { S: "pending_scan" } }, "#s = :pending"),
     async pendingBefore(before) {

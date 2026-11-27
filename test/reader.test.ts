@@ -5,12 +5,19 @@ import { read, stale, type Reader, type Shelf } from "../src/reader.js";
 
 const bucket = "chutchut-inbound-test";
 
-type Item = { state: string; at: string; purgeAt?: string; from?: string; objectKey: string; why?: string };
+type Item = { state: string; at: string; purgeAt?: string; from?: string; objectKey: string; why?: string; shown?: boolean; clean?: boolean; notified?: boolean };
 
 /** A shelf in memory, with the same state rules as the table's conditional updates. */
 function memory(items: Record<string, Item>): Shelf {
   return {
-    async get(id) { const i = items[id]; return i && { state: i.state, at: i.at }; },
+    async get(id) { const i = items[id]; return i && { state: i.state, at: i.at, shown: i.shown, clean: i.clean, notified: i.notified }; },
+    async clear(id) {
+      const i = items[id];
+      if (i?.state === "pending_scan") { items[id] = { ...i, state: "clean", clean: true }; return true; }
+      if (i?.state === "knock" && i.shown) { items[id] = { ...i, clean: true }; return true; }
+      return false;
+    },
+    async notified(id) { const i = items[id]!; if (i.notified) return false; i.notified = true; return true; },
     async keep(id, kept) {
       const i = items[id];
       if (i?.state !== "pending_scan") return false;
@@ -40,10 +47,15 @@ function scan(key: string, status: string, over: Record<string, unknown> = {}) {
   };
 }
 
-function setup(items: Record<string, Item>) {
+function setup(items: Record<string, Item>, mode: "inbox" | "tafs" = "inbox", failNotify = 0) {
   const copies: [string, string][] = [];
-  const r: Reader = { bucket, shelf: memory(items), copy: async (a, b) => { copies.push([a, b]); } };
-  return { r, items, copies };
+  const told: string[] = [];
+  let failing = failNotify;
+  const r: Reader = {
+    bucket, mode, shelf: memory(items), copy: async (a, b) => { copies.push([a, b]); },
+    notify: async (id) => { if (failing > 0) { failing -= 1; throw new Error("tafs down"); } told.push(id); },
+  };
+  return { r, items, copies, told };
 }
 
 const pending = (at = "2026-11-27T18:00:00.000Z"): Item => ({ state: "pending_scan", at, purgeAt: "2026-12-27T18:00:00.000Z", from: "ana@example.test", objectKey: "in/m1" });
@@ -107,6 +119,40 @@ describe("reader", () => {
   it("raises mail still waiting for its scan after three days, well before its 30", async () => {
     const shelf = memory({ old: pending("2026-11-20T00:00:00.000Z"), fresh: pending("2026-11-27T00:00:00.000Z"), kept: { state: "mail", at: "2026-11-01T00:00:00.000Z", objectKey: "kept/kept" } });
     expect(await stale(shelf, new Date("2026-11-27T18:00:00Z"))).toEqual(["old"]);
+  });
+});
+
+describe("reader, as tafs cloud's mail provider", () => {
+  it("keeps nothing for good: clean mail is marked clean with its 30 days, and tafs is told once", async () => {
+    const { r, items, copies, told } = setup({ m1: pending() }, "tafs");
+    expect(await read(scan("in/m1", "NO_THREATS_FOUND"), r)).toBe("told");
+    expect(items.m1).toMatchObject({ state: "clean", purgeAt: "2026-12-27T18:00:00.000Z", notified: true });
+    expect(copies).toEqual([]);
+    expect(await read(scan("in/m1", "NO_THREATS_FOUND"), r)).toBe("nothing to do");
+    expect(told).toEqual(["m1"]);
+  });
+
+  it("tells tafs about a shown knock once it's clean, never one kept for the digest", async () => {
+    const { r, items, told } = setup({
+      k1: { state: "knock", at: "a", purgeAt: "p", objectKey: "in/k1", shown: true },
+      k2: { state: "knock", at: "a", purgeAt: "p", objectKey: "in/k2", shown: false },
+    }, "tafs");
+    expect(await read(scan("in/k1", "NO_THREATS_FOUND"), r)).toBe("told");
+    expect(await read(scan("in/k2", "NO_THREATS_FOUND"), r)).toBe("nothing to do");
+    expect(told).toEqual(["k1"]);
+    expect(items.k1).toMatchObject({ state: "knock", clean: true });
+    expect(items.k2!.clean).toBeUndefined();
+  });
+
+  it("tells tafs on the retry when telling failed, and never before the scan", async () => {
+    const { r, told } = setup({ m1: pending() }, "tafs", 1);
+    await expect(read(scan("in/m1", "NO_THREATS_FOUND"), r)).rejects.toThrow("tafs down");
+    expect(told).toEqual([]);
+    expect(await read(scan("in/m1", "NO_THREATS_FOUND"), r)).toBe("told");
+    expect(told).toEqual(["m1"]);
+    const held = setup({ m2: pending() }, "tafs");
+    expect(await read(scan("in/m2", "FAILED"), held.r)).toBe("held");
+    expect(held.told).toEqual([]);
   });
 });
 

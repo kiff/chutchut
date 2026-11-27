@@ -1,5 +1,5 @@
 import type { Pairing } from "./door.js";
-import { route, type Route } from "./ses.js";
+import { route, type Auth, type Route } from "./ses.js";
 import { checkSns, type SnsCheck } from "./sns.js";
 
 /**
@@ -41,6 +41,10 @@ export type Filed = {
   /** When it's deleted: 30 days after it was filed. */
   purgeAt: string;
   from?: string;
+  /** SES's sender checks, for a sender proven here only (see `Auth`). */
+  auth?: Auth;
+  /** The address of ours SES delivered it to (its receipt's recipient): what tafs's door is chosen by. */
+  recipient?: string;
 } & (
   | { state: "pending_scan" } // paired: read once GuardDuty says NO_THREATS_FOUND
   | { state: "knock"; shown: boolean }
@@ -137,7 +141,8 @@ async function place(r: Route, base: { messageId: string; objectKey: string; at:
   if (r.to === "refused") return { ...base, state: "refused", why: r.why };
   if (r.to === "held") return { ...base, state: "held", why: r.why };
   const sent = "from" in r ? r.from : undefined;
-  const from = sent === undefined ? {} : { from: sent };
+  const proven = "auth" in r && r.auth !== null ? { auth: r.auth } : {};
+  const from = { ...(sent === undefined ? {} : { from: sent }), ...proven, recipient: r.recipient };
   // Both are counted for each message, so neither can be got round by spreading mail over the other.
   const byAddress = await w.store.bump(`${day}:${entry(r.recipient, w.entries)}:in`);
   const byAccount = await w.store.bump(`${day}:in`);

@@ -13,6 +13,11 @@
 #   CHUTCHUT_RECIPIENTS  the addresses or domains SES receives for, comma-separated (required for up)
 #   CHUTCHUT_NAME        the prefix for the topic, the rule set, the rule and the scan's role (default chutchut)
 #   CHUTCHUT_PAIRED      the paired senders' addresses, comma-separated (until pairing is kept in the table)
+#   CHUTCHUT_MODE        "inbox" (default) or "tafs": chutchut as tafs cloud's mail provider. tafs mode needs:
+#   CHUTCHUT_TAFS_WEBHOOK  tafs cloud's email webhook (https://…/v1/doors/email)
+#   CHUTCHUT_WEBHOOK_SECRET_PARAM  the SSM SecureString holding the webhook's signing secret
+#   CHUTCHUT_READ_KEY_PARAM        the SSM SecureString holding the SHA-256 (hex) of tafs's read key
+#                        Both parameters are put there by their owner, never by this script or in this repository.
 #   CHUTCHUT_ALERT_EMAIL an address the daily alert is mailed to (optional: it confirms by mail before any arrives)
 #   AWS_REGION           default eu-west-1, where SES receives mail
 #   CHUTCHUT_ACTIVATE    "yes" makes chutchut's rule set the region's active one. SES has one active rule set per region, so
@@ -51,6 +56,9 @@ BUCKET=${CHUTCHUT_BUCKET:?CHUTCHUT_BUCKET names the bucket}
 TOPIC=$NAME-inbound
 ALERTS=$NAME-alerts
 FUNCTIONS="webhook reader stale"
+MODE_=${CHUTCHUT_MODE:-inbox}
+[[ "$MODE_" == inbox || "$MODE_" == tafs ]] || { echo "CHUTCHUT_MODE is inbox or tafs" >&2; exit 2; }
+[[ "$MODE_" == tafs ]] && FUNCTIONS="$FUNCTIONS provider"
 TABLE=$NAME-mail
 TOPIC_KEY=alias/$NAME-inbound-topic
 RULE_SET=$NAME
@@ -152,9 +160,20 @@ function_policy() { # account function
   case "$2" in
     webhook) own="{\"Sid\":\"Table\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\",\"dynamodb:PutItem\",\"dynamodb:UpdateItem\"],\"Resource\":\"$table\"}" ;;
     reader) own="{\"Sid\":\"Table\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\",\"dynamodb:UpdateItem\"],\"Resource\":\"$table\"},
+ {\"Sid\":\"Failed\",\"Effect\":\"Allow\",\"Action\":\"sns:Publish\",\"Resource\":\"arn:aws:sns:$REGION:$1:$ALERTS\"}"
+      if [[ "$MODE_" == tafs ]]; then
+        # tafs mode keeps nothing for good: no kept/; it signs tafs's webhook with the secret in SSM.
+        own="$own,
+ {\"Sid\":\"WebhookSecret\",\"Effect\":\"Allow\",\"Action\":\"ssm:GetParameter\",\"Resource\":\"arn:aws:ssm:$REGION:$1:parameter${WEBHOOK_SECRET_PARAM}\"}"
+      else
+        # The copy to kept/ keeps GuardDuty's scan tag: read on in/, written on kept/.
+        own="$own,
  {\"Sid\":\"ReadIn\",\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\",\"s3:GetObjectTagging\"],\"Resource\":\"arn:aws:s3:::$BUCKET/$PREFIX*\"},
- {\"Sid\":\"WriteKept\",\"Effect\":\"Allow\",\"Action\":[\"s3:PutObject\",\"s3:PutObjectTagging\"],\"Resource\":\"arn:aws:s3:::$BUCKET/kept/*\"},
- {\"Sid\":\"Failed\",\"Effect\":\"Allow\",\"Action\":\"sns:Publish\",\"Resource\":\"arn:aws:sns:$REGION:$1:$ALERTS\"}" ;;
+ {\"Sid\":\"WriteKept\",\"Effect\":\"Allow\",\"Action\":[\"s3:PutObject\",\"s3:PutObjectTagging\"],\"Resource\":\"arn:aws:s3:::$BUCKET/kept/*\"}"
+      fi ;;
+    provider) own="{\"Sid\":\"Table\",\"Effect\":\"Allow\",\"Action\":\"dynamodb:GetItem\",\"Resource\":\"$table\"},
+ {\"Sid\":\"ReadIn\",\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::$BUCKET/$PREFIX*\"},
+ {\"Sid\":\"ReadKey\",\"Effect\":\"Allow\",\"Action\":\"ssm:GetParameter\",\"Resource\":\"arn:aws:ssm:$REGION:$1:parameter${READ_KEY_PARAM}\"}" ;;
     stale) own="{\"Sid\":\"Table\",\"Effect\":\"Allow\",\"Action\":\"dynamodb:Scan\",\"Resource\":\"$table\"},
  {\"Sid\":\"Alert\",\"Effect\":\"Allow\",\"Action\":\"sns:Publish\",\"Resource\":\"arn:aws:sns:$REGION:$1:$ALERTS\"}" ;;
   esac
@@ -171,9 +190,12 @@ JSON
 }
 
 if [[ "$MODE" == policies ]]; then
-  # A made-up account, so the shapes can be read and tested with no AWS access.
+  # A made-up account (and, in tafs mode, made-up parameter names), so the shapes can be read and tested with no AWS access.
   account=000000000000 arn="arn:aws:sns:$REGION:000000000000:$TOPIC"
-  printf '%s\n' "{\"bucket\":$(bucket_policy $account),\"topic\":$(topic_policy $account "$arn"),\"topic_key\":$(topic_key_policy $account),\"lifecycle\":$(lifecycle),\"scan_trust\":$(scan_trust),\"scan\":$(scan_policy $account),\"lambda_trust\":$(lambda_trust),\"webhook\":$(function_policy $account webhook),\"reader\":$(function_policy $account reader),\"stale\":$(function_policy $account stale),\"scan_rule\":$(scan_rule_pattern)}"
+  WEBHOOK_SECRET_PARAM=/chutchut/webhook-secret READ_KEY_PARAM=/chutchut/read-key
+  provider=""
+  [[ "$MODE_" == tafs ]] && provider=",\"provider\":$(function_policy $account provider)"
+  printf '%s\n' "{\"bucket\":$(bucket_policy $account),\"topic\":$(topic_policy $account "$arn"),\"topic_key\":$(topic_key_policy $account),\"lifecycle\":$(lifecycle),\"scan_trust\":$(scan_trust),\"scan\":$(scan_policy $account),\"lambda_trust\":$(lambda_trust),\"webhook\":$(function_policy $account webhook),\"reader\":$(function_policy $account reader),\"stale\":$(function_policy $account stale),\"scan_rule\":$(scan_rule_pattern)$provider}"
   exit 0
 fi
 [[ "$MODE" == up ]] || { echo "usage: deploy/aws.sh up | policies" >&2; exit 2; }
@@ -185,6 +207,18 @@ for r in "${recipient_list[@]}"; do
   r=${r#"${r%%[![:space:]]*}"} r=${r%"${r##*[![:space:]]}"} # trimmed at both ends only
   [[ "$r" =~ $RECIPIENT ]] || { echo "CHUTCHUT_RECIPIENTS: not an address or a domain: $r" >&2; exit 2; }
 done
+# tafs mode's settings, checked before AWS is called.
+TAFS_WEBHOOK="" WEBHOOK_SECRET_PARAM="" READ_KEY_PARAM=""
+if [[ "$MODE_" == tafs ]]; then
+  TAFS_WEBHOOK=${CHUTCHUT_TAFS_WEBHOOK:?tafs mode needs CHUTCHUT_TAFS_WEBHOOK}
+  WEBHOOK_SECRET_PARAM=${CHUTCHUT_WEBHOOK_SECRET_PARAM:?tafs mode needs CHUTCHUT_WEBHOOK_SECRET_PARAM}
+  READ_KEY_PARAM=${CHUTCHUT_READ_KEY_PARAM:?tafs mode needs CHUTCHUT_READ_KEY_PARAM}
+  [[ "$TAFS_WEBHOOK" =~ ^https://[a-z0-9.-]+(:[0-9]+)?/v1/doors/email$ ]] || { echo "CHUTCHUT_TAFS_WEBHOOK isn't tafs cloud's email webhook" >&2; exit 2; }
+  for p in "$WEBHOOK_SECRET_PARAM" "$READ_KEY_PARAM"; do
+    [[ "$p" =~ ^/[A-Za-z0-9_./-]+$ ]] || { echo "not an SSM parameter name: $p" >&2; exit 2; }
+  done
+fi
+
 # The paired senders: each an address, joined by commas.
 PAIRED=""
 if [[ -n "${CHUTCHUT_PAIRED:-}" ]]; then
@@ -196,7 +230,7 @@ if [[ -n "${CHUTCHUT_PAIRED:-}" ]]; then
     PAIRED+="${PAIRED:+,}$a"
   done
 fi
-[[ -f "$DIST/webhook.mjs" && -f "$DIST/reader.mjs" && -f "$DIST/stale.mjs" ]] \
+[[ -f "$DIST/webhook.mjs" && -f "$DIST/reader.mjs" && -f "$DIST/stale.mjs" && -f "$DIST/provider.mjs" ]] \
   || { echo "build the functions first: npm run build" >&2; exit 2; }
 ACTIVATE=${CHUTCHUT_ACTIVATE:-}
 [[ -z "$ACTIVATE" || "$ACTIVATE" == yes ]] || { echo "CHUTCHUT_ACTIVATE is yes or unset" >&2; exit 2; }
@@ -338,7 +372,7 @@ function_up() { # name topic-arn alerts-arn
   cp "$DIST/$1.mjs" "$dir/index.mjs"
   (cd "$dir" && zip -q function.zip index.mjs)
   # Every value is checked above (names, ARNs, addresses), so none can carry a quote into this JSON.
-  local env="{\"Variables\":{\"CHUTCHUT_BUCKET\":\"$BUCKET\",\"CHUTCHUT_TABLE\":\"$TABLE\",\"CHUTCHUT_TOPIC_ARN\":\"$2\",\"CHUTCHUT_ALERTS_ARN\":\"$3\",\"CHUTCHUT_PAIRED\":\"$PAIRED\",\"CHUTCHUT_RECIPIENTS\":\"$(printf '%s' "$RECIPIENTS" | tr -d ' ')\"}}"
+  local env="{\"Variables\":{\"CHUTCHUT_BUCKET\":\"$BUCKET\",\"CHUTCHUT_TABLE\":\"$TABLE\",\"CHUTCHUT_TOPIC_ARN\":\"$2\",\"CHUTCHUT_ALERTS_ARN\":\"$3\",\"CHUTCHUT_PAIRED\":\"$PAIRED\",\"CHUTCHUT_MODE\":\"$MODE_\",\"CHUTCHUT_TAFS_WEBHOOK\":\"$TAFS_WEBHOOK\",\"CHUTCHUT_WEBHOOK_SECRET_PARAM\":\"$WEBHOOK_SECRET_PARAM\",\"CHUTCHUT_READ_KEY_PARAM\":\"$READ_KEY_PARAM\",\"CHUTCHUT_RECIPIENTS\":\"$(printf '%s' "$RECIPIENTS" | tr -d ' ')\"}}"
   if aws lambda get-function --function-name "$fn" --query Configuration.FunctionName >/dev/null 2>&1; then
     aws lambda update-function-code --function-name "$fn" --zip-file "fileb://$dir/function.zip" --query FunctionName >/dev/null
     aws lambda wait function-updated-v2 --function-name "$fn"
@@ -396,10 +430,21 @@ scan
 for f in $FUNCTIONS; do function_up "$f" "$arn" "$alerts_arn"; done
 # The public webhook can't take more than a few at once, so a flood can't run up the table or the account's Lambda room.
 aws lambda put-function-concurrency --function-name "$NAME-webhook" --reserved-concurrent-executions 10 >/dev/null
+# tafs's read and send take the provider's public URL: at most 10 at once too.
+[[ "$MODE_" == tafs ]] && aws lambda put-function-concurrency --function-name "$NAME-provider" --reserved-concurrent-executions 10 >/dev/null
 # A scan result the reader couldn't handle after EventBridge's retries is raised on the alerts topic, never dropped.
 aws lambda put-function-event-invoke-config --function-name "$NAME-reader" --maximum-retry-attempts 2 \
   --destination-config "{\"OnFailure\":{\"Destination\":\"$alerts_arn\"}}" >/dev/null
 webhook_up "$arn"
+# tafs mode: the read API's own function URL (tafs's read key is checked in the code); it prints it for tafs's setting.
+if [[ "$MODE_" == tafs ]]; then
+  if ! aws lambda get-function-url-config --function-name "$NAME-provider" --query FunctionUrl >/dev/null 2>&1; then
+    aws lambda create-function-url-config --function-name "$NAME-provider" --auth-type NONE --query FunctionUrl >/dev/null
+    aws lambda add-permission --function-name "$NAME-provider" --statement-id url --action lambda:InvokeFunctionUrl \
+      --principal '*' --function-url-auth-type NONE >/dev/null
+  fi
+  echo "tafs cloud's provider URL: $(aws lambda get-function-url-config --function-name "$NAME-provider" --query FunctionUrl)"
+fi
 trigger scanned reader --event-pattern "$(scan_rule_pattern)"
 trigger stale-daily stale --schedule-expression "rate(1 day)"
 rule "$arn"

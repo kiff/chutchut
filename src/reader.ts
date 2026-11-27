@@ -7,11 +7,18 @@
  *   until the owner deletes it.
  * - **Threats found:** the item is refused ("malware") and loses its sender's address, whatever it was waiting as.
  * - **Any other result** (unsupported, access denied, failed): mail waiting for its scan is held, for the owner.
+ * - **As tafs cloud's mail provider** (`mode: "tafs"`), chutchut keeps nothing for good: clean mail a proven sender
+ *   sent becomes `clean` (its 30-day expiry kept), a clean knock that was shown is marked clean, and tafs is told
+ *   (`notify`), once, only after the scan. tafs reads it once and keeps its own chat copy.
  * - **Waiting too long:** `stale` lists mail still waiting for its scan after a few days, so it's raised before its
  *   30 days run out and nothing a paired sender sent expires unseen.
  */
 export interface Shelf {
-  get(messageId: string): Promise<{ state: string; at: string } | undefined>;
+  get(messageId: string): Promise<{ state: string; at: string; shown?: boolean; clean?: boolean; notified?: boolean } | undefined>;
+  /** tafs mode: pending_scan → clean, or a shown knock marked clean; the 30-day expiry kept. False otherwise. */
+  clear(messageId: string): Promise<boolean>;
+  /** tafs was told about it: true the first time. */
+  notified(messageId: string): Promise<boolean>;
   /** pending_scan → mail at keptKey, its expiry removed. False if it wasn't pending_scan. */
   keep(messageId: string, keptKey: string): Promise<boolean>;
   /** pending_scan, knock or held → refused, its sender's address removed. False otherwise. */
@@ -24,12 +31,16 @@ export interface Shelf {
 
 export interface Reader {
   bucket: string;
+  /** "inbox": chutchut's own (self-hosted); "tafs": tafs cloud's mail provider. */
+  mode: "inbox" | "tafs";
+  /** tafs mode: tells tafs cloud a message is readable (the signed email.received webhook). */
+  notify: (messageId: string) => Promise<void>;
   shelf: Shelf;
   /** Copies one object in the bucket (S3 CopyObject). */
   copy: (fromKey: string, toKey: string) => Promise<void>;
 }
 
-export type Read = "kept" | "refused" | "held" | "nothing to do" | "not ours";
+export type Read = "kept" | "told" | "refused" | "held" | "nothing to do" | "not ours";
 
 const IN = "in/";
 const KEPT = "kept/";
@@ -52,6 +63,7 @@ export async function read(event: unknown, r: Reader): Promise<Read> {
   const item = await r.shelf.get(id);
   if (item === undefined) return "nothing to do";
   if (status === "THREATS_FOUND") return (await r.shelf.refuse(id, "malware")) ? "refused" : "nothing to do";
+  if (r.mode === "tafs" && status === "NO_THREATS_FOUND") return tell(id, item, r);
   if (item.state !== "pending_scan") return "nothing to do";
   if (status === "NO_THREATS_FOUND") {
     // Copied first: if keeping fails, the retry copies again and keeps; the item never points at a missing copy.
@@ -59,6 +71,21 @@ export async function read(event: unknown, r: Reader): Promise<Read> {
     return (await r.shelf.keep(id, KEPT + id)) ? "kept" : "nothing to do";
   }
   return (await r.shelf.hold(id, `the malware scan said ${status.toLowerCase().replace(/_/g, " ")}`)) ? "held" : "nothing to do";
+}
+
+/**
+ * tafs mode, a clean scan: mark it clean if it's mail a proven sender sent or a shown knock, then tell tafs once.
+ * Told after it's marked, and marked told after tafs took it: a retried event tells tafs again only if it didn't take
+ * it, never before the scan.
+ */
+async function tell(id: string, item: { state: string; shown?: boolean; clean?: boolean; notified?: boolean }, r: Reader): Promise<Read> {
+  const readable = item.state === "pending_scan" || item.state === "clean" || (item.state === "knock" && item.shown === true);
+  if (!readable) return "nothing to do";
+  if (!item.clean && item.state !== "clean" && !(await r.shelf.clear(id))) return "nothing to do";
+  if (item.notified) return "nothing to do";
+  await r.notify(id);
+  await r.shelf.notified(id);
+  return "told";
 }
 
 /** Mail still waiting for its scan `days` after it arrived: raise each, well before its 30 days end. */
