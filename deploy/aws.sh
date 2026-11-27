@@ -13,7 +13,8 @@
 #   LOGE_NAME         the prefix for the topic, the rule set, the rule and the scan's role (default loge)
 #   AWS_REGION        default eu-west-1, where SES receives mail
 #   LOGE_ACTIVATE     "yes" makes loge's rule set the region's active one. SES has one active rule set per region, so
-#                     this replaces any other: it's off unless asked for.
+#                     it's off unless asked for, and refused while another set is active: activating would silently
+#                     stop the mail that set receives.
 #
 # The bucket:
 #   - Block Public Access on every setting, and a policy that refuses any request not over TLS;
@@ -22,8 +23,13 @@
 #   - encrypted at rest (SSE-S3), and raw messages under in/ are deleted after 30 days: the mail a person keeps lives
 #     in loge's own store, not here.
 # The topic signs with SHA256 (SignatureVersion 2), the only version loge's webhook accepts, and only SES from this
-# account, for this rule, may publish to it. The rule requires TLS from the sending server and asks SES for its spam
-# and virus verdicts. GuardDuty Malware Protection for S3 scans each new object under in/ and tags it with the result.
+# account, for this rule, may publish to it. It's encrypted with its own KMS key, which SES may use only for this rule,
+# and only this account may subscribe to it, only over HTTPS. The rule requires TLS from the sending server and asks SES for its spam
+# and virus verdicts. GuardDuty Malware Protection for S3 scans each new object under in/ and tags it with the result
+# (GuardDutyMalwareScanStatus).
+#
+# SES's notice reaches the topic before GuardDuty's tag reaches the object, so whatever reads a message waits for its
+# tag to say NO_THREATS_FOUND before reading its body or any attachment, and holds it otherwise.
 set -euo pipefail
 
 MODE=${1:-}
@@ -31,6 +37,7 @@ REGION=${AWS_REGION:-eu-west-1}
 NAME=${LOGE_NAME:-loge}
 BUCKET=${LOGE_BUCKET:?LOGE_BUCKET names the bucket}
 TOPIC=$NAME-inbound
+TOPIC_KEY=alias/$NAME-inbound-topic
 RULE_SET=$NAME
 RULE=$NAME-inbound
 SCAN_ROLE=$NAME-malware-scan
@@ -59,7 +66,24 @@ topic_policy() { # account topic-arn
  {"Sid":"SesPublishesOnlyForThisRule","Effect":"Allow","Principal":{"Service":"ses.amazonaws.com"},"Action":"SNS:Publish",
   "Resource":"$2",
   "Condition":{"StringEquals":{"AWS:SourceAccount":"$1"},
-   "ArnLike":{"AWS:SourceArn":"arn:aws:ses:$REGION:$1:receipt-rule-set/$RULE_SET:receipt-rule/$RULE"}}}
+   "ArnLike":{"AWS:SourceArn":"arn:aws:ses:$REGION:$1:receipt-rule-set/$RULE_SET:receipt-rule/$RULE"}}},
+ {"Sid":"SubscribeOnlyFromThisAccount","Effect":"Deny","Principal":"*","Action":"SNS:Subscribe","Resource":"$2",
+  "Condition":{"StringNotEquals":{"aws:PrincipalAccount":"$1"}}},
+ {"Sid":"SubscribeOnlyOverHttps","Effect":"Deny","Principal":"*","Action":"SNS:Subscribe","Resource":"$2",
+  "Condition":{"StringNotEquals":{"SNS:Protocol":"https"}}}
+]}
+JSON
+}
+
+# The topic's key: this account administers it, and SES may use it only to publish for this rule.
+topic_key_policy() { # account
+  cat <<JSON
+{"Version":"2012-10-17","Statement":[
+ {"Sid":"Account","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::$1:root"},"Action":"kms:*","Resource":"*"},
+ {"Sid":"SesForThisRule","Effect":"Allow","Principal":{"Service":"ses.amazonaws.com"},"Action":["kms:GenerateDataKey*","kms:Decrypt"],
+  "Resource":"*",
+  "Condition":{"StringEquals":{"aws:SourceAccount":"$1"},
+   "ArnLike":{"aws:SourceArn":"arn:aws:ses:$REGION:$1:receipt-rule-set/$RULE_SET:receipt-rule/$RULE"}}}
 ]}
 JSON
 }
@@ -98,11 +122,18 @@ JSON
 if [[ "$MODE" == policies ]]; then
   # A made-up account, so the shapes can be read and tested with no AWS access.
   account=000000000000 arn="arn:aws:sns:$REGION:000000000000:$TOPIC"
-  printf '%s\n' "{\"bucket\":$(bucket_policy $account),\"topic\":$(topic_policy $account "$arn"),\"lifecycle\":$(lifecycle),\"scan_trust\":$(scan_trust),\"scan\":$(scan_policy $account)}"
+  printf '%s\n' "{\"bucket\":$(bucket_policy $account),\"topic\":$(topic_policy $account "$arn"),\"topic_key\":$(topic_key_policy $account),\"lifecycle\":$(lifecycle),\"scan_trust\":$(scan_trust),\"scan\":$(scan_policy $account)}"
   exit 0
 fi
 [[ "$MODE" == up ]] || { echo "usage: deploy/aws.sh up | policies" >&2; exit 2; }
 RECIPIENTS=${LOGE_RECIPIENTS:?LOGE_RECIPIENTS names the addresses or domains SES receives for}
+# Each an address or a domain, nothing else: a typo here would receive mail for the wrong name, or none.
+RECIPIENT='^([A-Za-z0-9._%+-]+@)?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$'
+IFS=, read -r -a recipient_list <<<"$RECIPIENTS"
+for r in "${recipient_list[@]}"; do
+  r=${r#"${r%%[![:space:]]*}"} r=${r%"${r##*[![:space:]]}"} # trimmed at both ends only
+  [[ "$r" =~ $RECIPIENT ]] || { echo "LOGE_RECIPIENTS: not an address or a domain: $r" >&2; exit 2; }
+done
 ACTIVATE=${LOGE_ACTIVATE:-}
 [[ -z "$ACTIVATE" || "$ACTIVATE" == yes ]] || { echo "LOGE_ACTIVATE is yes or unset" >&2; exit 2; }
 
@@ -121,8 +152,21 @@ bucket() {
   aws s3api put-bucket-policy --bucket "$BUCKET" --policy "$(bucket_policy "$ACCOUNT")"
 }
 
+topic_key() { # prints the key's id
+  local id; id=$(aws kms describe-key --key-id "$TOPIC_KEY" --query KeyMetadata.KeyId 2>/dev/null || true)
+  if [[ -z "$id" || "$id" == None ]]; then
+    id=$(aws kms create-key --description "$NAME inbound topic" --query KeyMetadata.KeyId)
+    aws kms create-alias --alias-name "$TOPIC_KEY" --target-key-id "$id"
+  fi
+  aws kms put-key-policy --key-id "$id" --policy-name default --policy "$(topic_key_policy "$ACCOUNT")"
+  aws kms enable-key-rotation --key-id "$id"
+  echo "$id"
+}
+
 topic() { # prints the topic's ARN, for the rule
+  local key; key=$(topic_key)
   local arn; arn=$(aws sns create-topic --name "$TOPIC" --query TopicArn)
+  aws sns set-topic-attributes --topic-arn "$arn" --attribute-name KmsMasterKeyId --attribute-value "$key"
   aws sns set-topic-attributes --topic-arn "$arn" --attribute-name SignatureVersion --attribute-value 2
   aws sns set-topic-attributes --topic-arn "$arn" --attribute-name Policy --attribute-value "$(topic_policy "$ACCOUNT" "$arn")"
   echo "$arn"
@@ -142,6 +186,11 @@ rule() { # topic-arn
     aws ses create-receipt-rule --rule-set-name "$RULE_SET" --rule "$body"
   fi
   if [[ "$ACTIVATE" == yes ]]; then
+    local active; active=$(aws ses describe-active-receipt-rule-set --query Metadata.Name 2>/dev/null || true)
+    if [[ -n "$active" && "$active" != None && "$active" != "$RULE_SET" ]]; then
+      echo "another SES rule set is active in $REGION: activating $RULE_SET would stop the mail it receives. Not activated." >&2
+      exit 3
+    fi
     aws ses set-active-receipt-rule-set --rule-set-name "$RULE_SET"
   fi
 }

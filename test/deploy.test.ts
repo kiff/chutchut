@@ -30,7 +30,7 @@ describe("deploy", () => {
   });
 
   it("lets only SES publish to the topic, for this account's own rule", () => {
-    expect(policies.topic.Statement).toEqual([expect.objectContaining({
+    expect(policies.topic.Statement.filter((s: { Effect: string }) => s.Effect === "Allow")).toEqual([expect.objectContaining({
       Effect: "Allow", Principal: { Service: "ses.amazonaws.com" }, Action: "SNS:Publish",
       Condition: { StringEquals: { "AWS:SourceAccount": "000000000000" }, ArnLike: { "AWS:SourceArn": rule } },
     })]);
@@ -43,6 +43,28 @@ describe("deploy", () => {
     for (const s of policies.scan.Statement) {
       expect(JSON.stringify(s.Resource)).not.toBe('"*"');
       expect(([] as string[]).concat(s.Action).some((a) => a === "s3:DeleteObject" || a === "s3:*")).toBe(false);
+    }
+  });
+
+  it("encrypts the topic with a key SES may use only for this rule, and lets only this account subscribe, over HTTPS", () => {
+    const ses = policies.topic_key.Statement.find((s: { Sid: string }) => s.Sid === "SesForThisRule");
+    expect(ses).toMatchObject({ Action: ["kms:GenerateDataKey*", "kms:Decrypt"], Condition: { StringEquals: { "aws:SourceAccount": "000000000000" }, ArnLike: { "aws:SourceArn": rule } } });
+    const denies = policies.topic.Statement.filter((s: { Effect: string }) => s.Effect === "Deny");
+    expect(denies).toEqual([
+      expect.objectContaining({ Action: "SNS:Subscribe", Condition: { StringNotEquals: { "aws:PrincipalAccount": "000000000000" } } }),
+      expect.objectContaining({ Action: "SNS:Subscribe", Condition: { StringNotEquals: { "SNS:Protocol": "https" } } }),
+    ]);
+  });
+
+  it("refuses a recipient that isn't an address or a domain, before calling AWS", () => {
+    for (const bad of ["support", "support@", "@kiff.test", "a b@kiff.test", "kiff.test;rm", "ok.test,bad"]) {
+      let code = 0;
+      try {
+        execFileSync("bash", ["deploy/aws.sh", "up"], { env: { PATH: "/usr/bin:/bin", LOGE_BUCKET: "b", LOGE_RECIPIENTS: bad }, stdio: "pipe" });
+      } catch (e) {
+        code = (e as { status: number }).status;
+      }
+      expect(code, bad).toBe(2);
     }
   });
 
