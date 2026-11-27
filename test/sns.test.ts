@@ -4,7 +4,7 @@ import { certificateURL, checkSns, stringToSign, type SnsMessage } from "../src/
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const pem = publicKey.export({ type: "spki", format: "pem" }).toString();
-const topicArn = "arn:aws:sns:eu-west-1:000000000000:loge-inbound";
+const topicArn = "arn:aws:sns:eu-west-1:000000000000:chutchut-inbound";
 const certURL = "https://sns.eu-west-1.amazonaws.com/SimpleNotificationService-0000.pem";
 const now = new Date("2026-11-27T18:00:00Z");
 
@@ -21,7 +21,7 @@ const fetched: string[] = [];
 const check = { topicArn, now: () => now, certificate: async (url: string) => { fetched.push(url); return pem; } };
 
 describe("sns", () => {
-  it("accepts a fresh notification from loge's topic, signed by SNS", async () => {
+  it("accepts a fresh notification from chutchut's topic, signed by SNS", async () => {
     const v = await checkSns(JSON.stringify(signed()), check);
     expect(v).toMatchObject({ ok: true });
     expect(await checkSns(JSON.stringify(signed({ Subject: "Amazon SES Email Receipt Notification" })), check)).toMatchObject({ ok: true });
