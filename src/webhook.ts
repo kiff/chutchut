@@ -45,6 +45,8 @@ export type Filed = {
   auth?: Auth;
   /** The address of ours SES delivered it to (its receipt's recipient): what tafs's door is chosen by. */
   recipient?: string;
+  /** Its own Message-ID: what a reply's In-Reply-To is checked against. */
+  rfcId?: string;
 } & (
   | { state: "pending_scan" } // paired: read once GuardDuty says NO_THREATS_FOUND
   | { state: "knock"; shown: boolean }
@@ -142,7 +144,8 @@ async function place(r: Route, base: { messageId: string; objectKey: string; at:
   if (r.to === "held") return { ...base, state: "held", why: r.why };
   const sent = "from" in r ? r.from : undefined;
   const proven = "auth" in r && r.auth !== null ? { auth: r.auth } : {};
-  const from = { ...(sent === undefined ? {} : { from: sent }), ...proven, recipient: r.recipient };
+  const thread = { recipient: r.recipient, ...("rfcId" in r && r.rfcId !== undefined ? { rfcId: r.rfcId } : {}) };
+  const from = { ...(sent === undefined ? {} : { from: sent }), ...proven, ...thread };
   // Both are counted for each message, so neither can be got round by spreading mail over the other.
   const byAddress = await w.store.bump(`${day}:${entry(r.recipient, w.entries)}:in`);
   const byAccount = await w.store.bump(`${day}:in`);

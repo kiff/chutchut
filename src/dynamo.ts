@@ -49,10 +49,26 @@ export function dynamoStore(client: Pick<DynamoDBClient, "send">, table: string,
       if (item.from !== undefined) fields.from = { S: item.from };
       if (item.auth !== undefined) fields.auth = { S: JSON.stringify(item.auth) };
       if (item.recipient !== undefined) fields.recipient = { S: item.recipient };
+      if (item.rfcId !== undefined) fields.rfcId = { S: item.rfcId };
       if (item.state === "knock") fields.shown = { S: item.shown ? "yes" : "no" };
       if (item.state === "held" || item.state === "refused") fields.why = { S: item.why };
       try {
         await client.send(new PutItemCommand({ TableName: table, Item: fields, ConditionExpression: "attribute_not_exists(pk)" }));
+        // The thread's key, so a reply naming this Message-ID finds who wrote and to which address of ours. It expires
+        // with the message. A Message-ID already known keeps its first writer: a second message can't take a thread over.
+        if (item.rfcId !== undefined && item.from !== undefined && item.recipient !== undefined) {
+          try {
+            await client.send(new PutItemCommand({
+              TableName: table, ConditionExpression: "attribute_not_exists(pk)",
+              Item: {
+                pk: { S: `mid#${item.rfcId}` }, messageId: { S: item.messageId }, from: { S: item.from },
+                recipient: { S: item.recipient }, purgeAt: fields.purgeAt!, expiresAt: fields.expiresAt!,
+              },
+            }));
+          } catch (e) {
+            if (!(e instanceof ConditionalCheckFailedException)) throw e;
+          }
+        }
         return true;
       } catch (e) {
         if (e instanceof ConditionalCheckFailedException) return false;
@@ -148,6 +164,53 @@ export function dynamoKnocks(client: Pick<DynamoDBClient, "send">, table: string
         start = page.LastEvaluatedKey;
       } while (start !== undefined);
       return out;
+    },
+  };
+}
+
+/** The send's records on the same table: a thread by its Message-ID, and each idempotency key's state. */
+export function dynamoSending(client: Pick<DynamoDBClient, "send">, table: string, now: () => Date) {
+  return {
+    async thread(rfcId: string) {
+      const got = await client.send(new GetItemCommand({ TableName: table, Key: { pk: { S: `mid#${rfcId}` } }, ConsistentRead: true }));
+      const i = got.Item;
+      const messageId = i?.messageId?.S, from = i?.from?.S, recipient = i?.recipient?.S;
+      return messageId && from && recipient ? { messageId, from, recipient } : undefined;
+    },
+    async item(messageId: string) {
+      const got = await client.send(new GetItemCommand({
+        TableName: table, Key: { pk: { S: `msg#${messageId}` } }, ConsistentRead: true,
+        ProjectionExpression: "#s, shown, clean, purgeAt", ExpressionAttributeNames: { "#s": "state" },
+      }));
+      const i = got.Item;
+      if (i?.state?.S === undefined) return undefined;
+      return { state: i.state.S, shown: i.shown?.S === "yes", clean: i.clean?.S === "yes", ...(i.purgeAt?.S ? { purgeAt: i.purgeAt.S } : {}) };
+    },
+    /** One conditional write: a new key, or one whose send failed, becomes "sending"; anything else is answered as it stands. */
+    async claim(key: string): Promise<"new" | "retry" | "sent" | "busy"> {
+      const expires = Math.floor(now().getTime() / 1000) + 7 * 24 * 60 * 60;
+      try {
+        const out = await client.send(new UpdateItemCommand({
+          TableName: table, Key: { pk: { S: `send#${key}` } },
+          UpdateExpression: "SET #s = :sending, expiresAt = :expires", ConditionExpression: "attribute_not_exists(pk) OR #s = :failed",
+          ExpressionAttributeNames: { "#s": "state" },
+          ExpressionAttributeValues: { ":sending": { S: "sending" }, ":failed": { S: "failed" }, ":expires": { N: String(expires) } },
+          ReturnValues: "UPDATED_OLD",
+        }));
+        return out.Attributes?.state?.S === "failed" ? "retry" : "new";
+      } catch (e) {
+        if (!(e instanceof ConditionalCheckFailedException)) throw e;
+        const got = await client.send(new GetItemCommand({
+          TableName: table, Key: { pk: { S: `send#${key}` } }, ConsistentRead: true, ProjectionExpression: "#s", ExpressionAttributeNames: { "#s": "state" },
+        }));
+        return got.Item?.state?.S === "sent" ? "sent" : "busy";
+      }
+    },
+    async done(key: string, ok: boolean) {
+      await client.send(new UpdateItemCommand({
+        TableName: table, Key: { pk: { S: `send#${key}` } }, UpdateExpression: "SET #s = :s",
+        ExpressionAttributeNames: { "#s": "state" }, ExpressionAttributeValues: { ":s": { S: ok ? "sent" : "failed" } },
+      }));
     },
   };
 }

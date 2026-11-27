@@ -144,6 +144,15 @@ scan_policy() { # account
 JSON
 }
 
+# The SES identities replies may be sent from: the domains SES receives for, nothing else.
+send_identities() { # account
+  local list="" d
+  for d in $(printf '%s' "${CHUTCHUT_RECIPIENTS:-example.test}" | tr ',' '\n' | sed 's/^ *//;s/ *$//;s/.*@//' | sort -u); do
+    list+="${list:+,}\"arn:aws:ses:$REGION:$1:identity/$d\""
+  done
+  printf '%s' "$list"
+}
+
 lambda_trust() {
   cat <<JSON
 {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}
@@ -171,7 +180,8 @@ function_policy() { # account function
  {\"Sid\":\"ReadIn\",\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\",\"s3:GetObjectTagging\"],\"Resource\":\"arn:aws:s3:::$BUCKET/$PREFIX*\"},
  {\"Sid\":\"WriteKept\",\"Effect\":\"Allow\",\"Action\":[\"s3:PutObject\",\"s3:PutObjectTagging\"],\"Resource\":\"arn:aws:s3:::$BUCKET/kept/*\"}"
       fi ;;
-    provider) own="{\"Sid\":\"Table\",\"Effect\":\"Allow\",\"Action\":\"dynamodb:GetItem\",\"Resource\":\"$table\"},
+    provider) own="{\"Sid\":\"Table\",\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\",\"dynamodb:UpdateItem\"],\"Resource\":\"$table\"},
+ {\"Sid\":\"SendReplies\",\"Effect\":\"Allow\",\"Action\":\"ses:SendEmail\",\"Resource\":[$(send_identities "$1")]},
  {\"Sid\":\"ReadIn\",\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::$BUCKET/$PREFIX*\"},
  {\"Sid\":\"ReadKey\",\"Effect\":\"Allow\",\"Action\":\"ssm:GetParameter\",\"Resource\":\"arn:aws:ssm:$REGION:$1:parameter${READ_KEY_PARAM}\"}" ;;
     stale) own="{\"Sid\":\"Table\",\"Effect\":\"Allow\",\"Action\":\"dynamodb:Scan\",\"Resource\":\"$table\"},
