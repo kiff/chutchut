@@ -20,9 +20,18 @@ export interface Sender {
  * DMARC proves the From's **domain**, not the mailbox: on a domain whose own users can send as any address, one of
  * them passes as a paired sender. Pairing says so to the owner where it's set up, and a paired sender stays under its
  * Card either way.
+ *
+ * `paired` comes from `pairing`, so its addresses are keyed as the sender's is.
  */
-export function door(sender: Sender, paired: ReadonlySet<string>): Door {
+export function door(sender: Sender, paired: Pairing): Door {
   return sender.dmarcAligned && paired.has(normalize(sender.address)) ? "paired" : "knock";
+}
+
+/** The paired addresses, each keyed by `normalize`: the only way to make what `door` reads. */
+export type Pairing = ReadonlySet<string> & { readonly __pairing: true };
+
+export function pairing(addresses: Iterable<string>): Pairing {
+  return new Set([...addresses].map(normalize)) as unknown as Pairing;
 }
 
 /** An address as pairing keys it: trimmed and lower-cased (a domain is case-insensitive, and nearly every mail server treats the mailbox name so too). */

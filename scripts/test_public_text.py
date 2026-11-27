@@ -30,7 +30,7 @@ class PublicText(unittest.TestCase):
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "public_text.py")
         lane = "-".join(["qa", "kiff"])
         footer = "\U0001f916 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_0123abc"
-        run = lambda body: subprocess.run([sys.executable, script, "--text"], input=body, capture_output=True, text=True)
+        run = lambda body: subprocess.run([sys.executable, script, "--text"], input=body, capture_output=True, text=True, encoding="utf-8")
         for planted in [f"Thanks {lane} for the read", "Decided on " + "kiff/" + "work#35", "READY → merge"]:
             failed = run(f"## Change\n\nThe rule itself.\n{planted}\n\n{footer}\n")
             self.assertEqual(failed.returncode, 1, planted)

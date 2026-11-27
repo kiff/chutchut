@@ -56,6 +56,9 @@ def in_text(lines):
 
 def main():
     if sys.argv[1:] == ["--text"]:
+        # UTF-8 whatever the platform's default (Windows reads stdin as cp1252), so an emoji can't fail the check.
+        sys.stdin.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(encoding="utf-8")
         found = in_text(sys.stdin.read().splitlines())
         if found:
             print("This pull request's text names a thread, a lane, its manager or a dated rule; say what changed and why:")
