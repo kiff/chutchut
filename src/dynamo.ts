@@ -56,7 +56,9 @@ export function dynamoStore(client: Pick<DynamoDBClient, "send">, table: string,
         await client.send(new PutItemCommand({ TableName: table, Item: fields, ConditionExpression: "attribute_not_exists(pk)" }));
         // The thread's key, so a reply naming this Message-ID finds who wrote and to which address of ours. It expires
         // with the message. A Message-ID already known keeps its first writer: a second message can't take a thread over.
-        if (item.rfcId !== undefined && item.from !== undefined && item.recipient !== undefined) {
+        // Only for a sender proven here (its sender check filed): a forged From, a knock with no proof, gets no thread,
+        // so no reply can ever go to someone who didn't write.
+        if (item.auth !== undefined && item.rfcId !== undefined && item.from !== undefined && item.recipient !== undefined) {
           try {
             await client.send(new PutItemCommand({
               TableName: table, ConditionExpression: "attribute_not_exists(pk)",
@@ -186,18 +188,25 @@ export function dynamoSending(client: Pick<DynamoDBClient, "send">, table: strin
       if (i?.state?.S === undefined) return undefined;
       return { state: i.state.S, shown: i.shown?.S === "yes", clean: i.clean?.S === "yes", ...(i.purgeAt?.S ? { purgeAt: i.purgeAt.S } : {}) };
     },
-    /** One conditional write: a new key, or one whose send failed, becomes "sending"; anything else is answered as it stands. */
+    /**
+     * One conditional write: a new key, one whose send failed, or one left "sending" longer than a send can take (the
+     * function died mid-send) becomes "sending"; anything else is answered as it stands.
+     */
     async claim(key: string): Promise<"new" | "retry" | "sent" | "busy"> {
-      const expires = Math.floor(now().getTime() / 1000) + 7 * 24 * 60 * 60;
+      const t = Math.floor(now().getTime() / 1000);
       try {
         const out = await client.send(new UpdateItemCommand({
           TableName: table, Key: { pk: { S: `send#${key}` } },
-          UpdateExpression: "SET #s = :sending, expiresAt = :expires", ConditionExpression: "attribute_not_exists(pk) OR #s = :failed",
+          UpdateExpression: "SET #s = :sending, claimedAt = :now, expiresAt = :expires",
+          ConditionExpression: "attribute_not_exists(pk) OR #s = :failed OR (#s = :sending AND claimedAt < :stale)",
           ExpressionAttributeNames: { "#s": "state" },
-          ExpressionAttributeValues: { ":sending": { S: "sending" }, ":failed": { S: "failed" }, ":expires": { N: String(expires) } },
+          ExpressionAttributeValues: {
+            ":sending": { S: "sending" }, ":failed": { S: "failed" }, ":now": { N: String(t) },
+            ":stale": { N: String(t - 120) }, ":expires": { N: String(t + 7 * 24 * 60 * 60) },
+          },
           ReturnValues: "UPDATED_OLD",
         }));
-        return out.Attributes?.state?.S === "failed" ? "retry" : "new";
+        return out.Attributes?.state?.S === undefined ? "new" : "retry";
       } catch (e) {
         if (!(e instanceof ConditionalCheckFailedException)) throw e;
         const got = await client.send(new GetItemCommand({

@@ -69,7 +69,7 @@ async function send(event: UrlEvent) {
     ...(event.headers?.["idempotency-key"] !== undefined ? { idempotencyKey: event.headers["idempotency-key"] } : {}),
   };
   const out = await sendReply(reply, {
-    ...sending, perDay: c.limits.inboundPerDay, now: () => new Date(),
+    ...sending, perDay: c.limits.inboundPerDay, accountPerDay: c.limits.accountPerDay, entries: c.entries, now: () => new Date(),
     transport: async (r) => {
       await ses.send(new SendEmailCommand({
         FromEmailAddress: r.from, Destination: { ToAddresses: [r.to] },

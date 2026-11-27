@@ -3,7 +3,7 @@ import { sendReply, type Reply, type Sending } from "../src/send.js";
 
 const now = new Date("2026-11-27T18:00:00Z");
 
-function setup(over: Partial<{ state: string; shown: boolean; clean: boolean; purgeAt: string; perDay: number; failSend: number }> = {}) {
+function setup(over: Partial<{ state: string; shown: boolean; clean: boolean; purgeAt: string; perDay: number; accountPerDay: number; failSend: number }> = {}) {
   const sent: unknown[] = [];
   const keys = new Map<string, "sending" | "sent" | "failed">();
   const counts = new Map<string, number>();
@@ -24,6 +24,8 @@ function setup(over: Partial<{ state: string; shown: boolean; clean: boolean; pu
     async bump(c) { const n = (counts.get(c) ?? 0) + 1; counts.set(c, n); return n; },
     async transport(r) { if (failing > 0) { failing -= 1; throw new Error("ses down"); } sent.push(r); },
     perDay: over.perDay ?? 100,
+    accountPerDay: over.accountPerDay ?? 1000,
+    entries: ["kiff.test"],
     now: () => now,
   };
   return { s, sent };
@@ -83,5 +85,20 @@ describe("send", () => {
     expect(sent).toHaveLength(1);
     expect(await sendReply(reply({ idempotencyKey: undefined }), s)).toMatchObject({ status: 400 });
     expect(await sendReply(reply({ subject: "Re: x\r\nBcc: m@example.test", idempotencyKey: "run-3:reply" }), s)).toMatchObject({ status: 400 });
+  });
+
+  it("takes only Message-IDs in References, nothing that could carry a header", async () => {
+    const { s, sent } = setup();
+    for (const references of ["<a@x> bcc:m@example.test", "<a@x>\r\nBcc: m@example.test", "plain", "<a@x> <b <c>"]) {
+      expect(await sendReply(reply({ references }), s), references).toMatchObject({ status: 400 });
+    }
+    expect(sent).toEqual([]);
+  });
+
+  it("counts the send cap by the configured entry and for the whole account", async () => {
+    const { s, sent } = setup({ perDay: 5, accountPerDay: 1 });
+    await sendReply(reply(), s);
+    expect(await sendReply(reply({ idempotencyKey: "run-9:reply" }), s)).toMatchObject({ status: 429 });
+    expect(sent).toHaveLength(1);
   });
 });
