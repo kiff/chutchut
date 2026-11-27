@@ -1,5 +1,5 @@
 import { door, type Door, type Pairing } from "./door.js";
-import { sender } from "./from.js";
+import { mailboxes, sender } from "./from.js";
 
 /**
  * What SES says about one received message (its "Received" notification, inside a checked SNS message), and where the
@@ -16,7 +16,12 @@ export type Route = { to: Door; messageId: string; objectKey: string; from: stri
 interface Verdict { status?: string }
 interface Received {
   notificationType?: string;
-  mail?: { messageId?: string; headers?: { name?: string; value?: string }[] };
+  mail?: {
+    messageId?: string;
+    headersTruncated?: boolean;
+    headers?: { name?: string; value?: string }[];
+    commonHeaders?: { from?: unknown };
+  };
   receipt?: {
     spamVerdict?: Verdict; virusVerdict?: Verdict; dkimVerdict?: Verdict; spfVerdict?: Verdict; dmarcVerdict?: Verdict;
     action?: { type?: string; bucketName?: string; objectKey?: string };
@@ -49,7 +54,14 @@ export function route(message: string, paired: Pairing, bucket: string): Route |
   const named = (name: string) => headers.filter((h) => h.name!.toLowerCase() === name).map((h) => (typeof h.value === "string" ? h.value : ""));
   const froms = named("from");
   const senders = named("sender");
-  const from = froms.length === 1 && senders.length <= 1 ? sender(froms[0], senders[0]) : undefined;
+  // A cut header list may have lost a second From or a Sender: no sender then.
+  const whole = n.mail?.headersTruncated === false || n.mail?.headersTruncated === undefined;
+  const read = whole && froms.length === 1 && senders.length <= 1 ? sender(froms[0], senders[0]) : undefined;
+  // SES's own reading of From must be one mailbox with the same address, or there's no sender: DMARC was judged on
+  // SES's reading, so a reading of ours that differs must never name the sender.
+  const ses = n.mail?.commonHeaders?.from;
+  const sesOne = Array.isArray(ses) && ses.length === 1 && typeof ses[0] === "string" ? mailboxes(ses[0]) : undefined;
+  const from = read !== undefined && sesOne?.length === 1 && sesOne[0]!.toLowerCase() === read.toLowerCase() ? read : undefined;
   // Spam that SES couldn't judge may still knock, but never passes as a paired sender's.
   const aligned = status(n.receipt?.dmarcVerdict) === "PASS" && spam === "PASS";
   return { to: from === undefined ? "knock" : door({ address: from, dmarcAligned: aligned }, paired), messageId, objectKey, from };

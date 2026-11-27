@@ -7,7 +7,24 @@ describe("from", () => {
     expect(sender("Ana Doe <ana@example.test>")).toBe("ana@example.test");
     // A display name that looks like a paired address is still only a name.
     expect(sender('"ana@example.test" <mallory@example.test>')).toBe("mallory@example.test");
-    expect(sender("ana@example.test <mallory@example.test>")).toBe("mallory@example.test");
+    expect(sender("J. Doe <j@example.test>")).toBe("j@example.test");
+  });
+
+  it("has no sender for a From that isn't a valid mailbox, so another reading can't name a different one", () => {
+    for (const from of [
+      "mallory@attacker.test <owner@paired.test>", // an @ in an unquoted display name
+      "<owner@paired.test> mallory@attacker.test", // text after the angle address
+      "Ana <owner@paired.test>x",
+      '"x" <owner@paired.test> <y@attacker.test>', // two angle addresses in one mailbox
+      "own\\er@paired.test", // a backslash outside quotes
+      "Ana [x] <owner@paired.test>",
+      "Ana; <owner@paired.test>",
+      "a@example.test,",
+      ",a@example.test",
+    ]) {
+      expect(sender(from), from).toBeUndefined();
+      expect(mailboxes(from), from).toBeUndefined();
+    }
   });
 
   it("keeps a quoted comma or bracket inside the display name", () => {

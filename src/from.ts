@@ -17,38 +17,92 @@ export function sender(from: string | undefined, senderHeader?: string): string 
 }
 
 /**
- * The addresses in an address-list header (RFC 5322 §3.4), in order: quoted strings and comments are skipped, so a
- * comma or angle bracket inside a display name never splits or names an address. A group (`team: a@x, b@y;`) gives
- * its members. Undefined when the header doesn't read as addresses.
+ * The addresses in an address-list header (RFC 5322 §3.4), in order, read strictly: a header that isn't a valid
+ * address list gives undefined, never a guess. Mail systems read a malformed From differently, so SES could judge
+ * DMARC on one domain while a looser reading here named another; strict reading means a malformed From has no sender.
+ *
+ * - A mailbox is an address, or a display name and then one address in angle brackets, and nothing after it but
+ *   spaces and comments up to the next `,`, `;` or the end.
+ * - A display name is words and quoted strings: an `@`, `<`, `>`, `[`, `]`, `:`, `;` or `\\` outside quotes isn't one.
+ * - A backslash is allowed only inside a quoted string or a comment; a quoted local part isn't accepted.
+ * - A group (`team: a@x, b@y;`) gives its members.
  */
 export function mailboxes(header: string): string[] | undefined {
-  const out: string[] = [];
+  const tokens = tokenize(header);
+  if (tokens === undefined) return undefined;
   let i = 0;
-  let current = "";
-  let angle: string | undefined;
-  let inAngle = false;
-  const end = () => {
-    const address = (angle ?? current).trim();
-    if (address !== "") out.push(address);
-    current = "";
-    angle = undefined;
+  const peek = () => tokens[i];
+  const special = (c: string) => peek()?.kind === "special" && peek()!.text === c;
+  const out: string[] = [];
+
+  const addrSpec = (): string | undefined => {
+    const local = peek();
+    if (local?.kind !== "atom") return undefined;
+    i += 1;
+    if (!special("@")) return undefined;
+    i += 1;
+    const domain = peek();
+    if (domain?.kind !== "atom") return undefined;
+    i += 1;
+    const a = `${local.text}@${domain.text}`;
+    return address(a) ? a : undefined;
   };
+
+  const mailbox = (): string | undefined => {
+    const start = i;
+    // A bare address: an atom then "@".
+    if (peek()?.kind === "atom" && tokens[i + 1]?.kind === "special" && tokens[i + 1]!.text === "@") return addrSpec();
+    // Otherwise a display name (possibly none) and an angle address.
+    while (peek()?.kind === "atom" || peek()?.kind === "quoted") i += 1;
+    if (!special("<")) {
+      i = start;
+      return undefined;
+    }
+    i += 1;
+    const a = addrSpec();
+    if (a === undefined || !special(">")) return undefined;
+    i += 1;
+    return a;
+  };
+
+  while (i < tokens.length) {
+    // A group: its name, ":", its members, ";".
+    let j = i;
+    while (tokens[j]?.kind === "atom" || tokens[j]?.kind === "quoted") j += 1;
+    if (j > i && tokens[j]?.kind === "special" && tokens[j]!.text === ":") {
+      i = j + 1;
+      while (!special(";")) {
+        const a = mailbox();
+        if (a === undefined) return undefined;
+        out.push(a);
+        if (special(",")) i += 1;
+        else if (!special(";")) return undefined;
+      }
+      i += 1;
+    } else {
+      const a = mailbox();
+      if (a === undefined) return undefined;
+      out.push(a);
+    }
+    if (i === tokens.length) break;
+    if (!special(",")) return undefined;
+    i += 1;
+    if (i === tokens.length) return undefined;
+  }
+  return out;
+}
+
+type Token = { kind: "atom" | "quoted" | "special"; text: string };
+
+/** The header's words, quoted strings and specials, with comments and spaces dropped. Undefined on anything unclosed or a stray backslash. */
+function tokenize(header: string): Token[] | undefined {
+  const out: Token[] = [];
+  let i = 0;
   while (i < header.length) {
     const c = header[i]!;
-    if (c === "\\") {
-      i += 2;
-      continue;
-    }
-    if (c === '"') {
-      // A quoted string: skipped whole (it's a display name, or a quoted local part, which isn't accepted).
-      const close = closing(header, i + 1, '"');
-      if (close < 0) return undefined;
-      if (inAngle) return undefined;
-      current = "";
-      i = close + 1;
-      continue;
-    }
-    if (c === "(") {
+    if (c === " " || c === "\t" || c === "\r" || c === "\n") {
+      i += 1;
+    } else if (c === "(") {
       let depth = 1;
       i += 1;
       while (i < header.length && depth > 0) {
@@ -58,62 +112,29 @@ export function mailboxes(header: string): string[] | undefined {
         i += 1;
       }
       if (depth > 0) return undefined;
-      continue;
-    }
-    if (c === "<") {
-      if (inAngle) return undefined;
-      inAngle = true;
-      angle = "";
+    } else if (c === '"') {
+      let text = "";
       i += 1;
-      continue;
-    }
-    if (c === ">") {
-      if (!inAngle) return undefined;
-      inAngle = false;
+      for (;;) {
+        if (i >= header.length) return undefined;
+        if (header[i] === "\\") { text += header[i + 1] ?? ""; i += 2; continue; }
+        if (header[i] === '"') { i += 1; break; }
+        text += header[i];
+        i += 1;
+      }
+      out.push({ kind: "quoted", text });
+    } else if ("<>@,;:".includes(c)) {
+      out.push({ kind: "special", text: c });
       i += 1;
-      continue;
+    } else if ("[]\\)".includes(c)) {
+      return undefined;
+    } else {
+      let text = "";
+      while (i < header.length && !" \t\r\n()\"<>@,;:[]\\".includes(header[i]!)) { text += header[i]; i += 1; }
+      out.push({ kind: "atom", text });
     }
-    if (inAngle) {
-      angle += c;
-      i += 1;
-      continue;
-    }
-    if (c === ",") {
-      end();
-      i += 1;
-      continue;
-    }
-    if (c === ":") {
-      // A group's name: what came before is its display name, not an address.
-      current = "";
-      i += 1;
-      continue;
-    }
-    if (c === ";") {
-      end();
-      i += 1;
-      continue;
-    }
-    if (c === " " || c === "\t" || c === "\r" || c === "\n") {
-      // Words before an angle address are a display name; a bare address has no spaces.
-      if (current.trim() !== "" && angle === undefined) current += " ";
-      i += 1;
-      continue;
-    }
-    current += c;
-    i += 1;
   }
-  if (inAngle) return undefined;
-  end();
-  return out.every(address) ? out : undefined;
-}
-
-function closing(text: string, from: number, quote: string): number {
-  for (let i = from; i < text.length; i++) {
-    if (text[i] === "\\") i += 1;
-    else if (text[i] === quote) return i;
-  }
-  return -1;
+  return out;
 }
 
 /** One plain address: a local part and a domain, with no spaces and nothing quoted. */
