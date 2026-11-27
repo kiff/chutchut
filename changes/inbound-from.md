@@ -1,0 +1,1 @@
+- **Inbound mail is checked before it's read.** A message from SES arrives as an SNS notification, accepted only from loge's own topic, signed by SNS and fresh. A virus or spam is refused, an unfinished virus scan is held for the owner, and only one From address whose DMARC passed can be a paired sender's; anything else knocks, display names never counted.
