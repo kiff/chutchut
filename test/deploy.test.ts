@@ -71,6 +71,37 @@ describe("deploy", () => {
     }
   });
 
+  it("gives each function only what it does, on only its own resources", () => {
+    const table = "arn:aws:dynamodb:eu-west-1:000000000000:table/chutchut-mail";
+    const actions = (p: { Statement: { Action: string | string[]; Resource: string }[] }) =>
+      p.Statement.flatMap((s) => ([] as string[]).concat(s.Action).map((a) => `${a} ${s.Resource}`)).sort();
+    const logs = (f: string) => [
+      `logs:CreateLogStream arn:aws:logs:eu-west-1:000000000000:log-group:/aws/lambda/chutchut-${f}:*`,
+      `logs:PutLogEvents arn:aws:logs:eu-west-1:000000000000:log-group:/aws/lambda/chutchut-${f}:*`,
+    ];
+    expect(actions(policies.webhook)).toEqual([`dynamodb:GetItem ${table}`, `dynamodb:PutItem ${table}`, `dynamodb:UpdateItem ${table}`, ...logs("webhook")].sort());
+    expect(actions(policies.reader)).toEqual([
+      `dynamodb:GetItem ${table}`, `dynamodb:UpdateItem ${table}`,
+      "s3:GetObject arn:aws:s3:::chutchut-inbound-test/in/*", "s3:PutObject arn:aws:s3:::chutchut-inbound-test/kept/*", ...logs("reader"),
+    ].sort());
+    expect(actions(policies.stale)).toEqual([`dynamodb:Scan ${table}`, "sns:Publish arn:aws:sns:eu-west-1:000000000000:chutchut-alerts", ...logs("stale")].sort());
+    expect(policies.lambda_trust.Statement[0].Principal).toEqual({ Service: "lambda.amazonaws.com" });
+  });
+
+  it("sends the reader GuardDuty's scan results for this bucket only", () => {
+    expect(policies.scan_rule).toEqual({
+      source: ["aws.guardduty"], "detail-type": ["GuardDuty Malware Protection Object Scan Result"],
+      detail: { s3ObjectDetails: { bucketName: ["chutchut-inbound-test"] } },
+    });
+  });
+
+  it("refuses a paired sender that isn't an address, and asks for the build, before calling AWS", () => {
+    const run = (env: Record<string, string>) =>
+      spawnSync("bash", ["deploy/aws.sh", "up"], { env: { PATH: "/usr/bin:/bin", CHUTCHUT_BUCKET: "b", CHUTCHUT_RECIPIENTS: "kiff.test", ...env } }).status;
+    expect(run({ CHUTCHUT_PAIRED: 'a"b@example.test', CHUTCHUT_DIST: "/nonexistent" })).toBe(2);
+    expect(run({ CHUTCHUT_PAIRED: "ana@example.test", CHUTCHUT_DIST: "/nonexistent" })).toBe(2);
+  });
+
   it("asks for a bucket and refuses an unknown mode", () => {
     expect(() => execFileSync("bash", ["deploy/aws.sh", "policies"], { env: { PATH: process.env.PATH }, stdio: "pipe" })).toThrow();
     expect(() => execFileSync("bash", ["deploy/aws.sh", "down"], { env: { PATH: process.env.PATH, CHUTCHUT_BUCKET: "b" }, stdio: "pipe" })).toThrow();
@@ -94,8 +125,13 @@ esac
 exit 0
 `);
     chmodSync(join(dir, "aws"), 0o755);
+    // Stand-in built functions, so the stand-in run needs no build.
+    for (const f of ["webhook", "reader", "stale"]) writeFileSync(join(dir, `${f}.mjs`), "export const handler = () => {};\n");
     const run = spawnSync("bash", ["deploy/aws.sh", "up"], {
-      env: { PATH: `${dir}:${process.env.PATH}`, CHUTCHUT_BUCKET: "chutchut-inbound-test", CHUTCHUT_RECIPIENTS: "support@example.test" },
+      env: {
+        PATH: `${dir}:${process.env.PATH}`, CHUTCHUT_BUCKET: "chutchut-inbound-test", CHUTCHUT_RECIPIENTS: "support@example.test",
+        CHUTCHUT_DIST: dir, CHUTCHUT_PAIRED: "ana@example.test",
+      },
     });
     return { status: run.status, out: run.stdout.toString() };
   }
