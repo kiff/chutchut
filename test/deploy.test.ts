@@ -92,7 +92,7 @@ describe("deploy", () => {
 
   it("as tafs's provider: no kept/, the reader reads only the webhook's secret, the read API only its key, the table and in/", () => {
     const tafs = JSON.parse(execFileSync("bash", ["deploy/aws.sh", "policies"], {
-      env: { ...process.env, CHUTCHUT_BUCKET: "chutchut-inbound-test", CHUTCHUT_MODE: "tafs", AWS_REGION: "eu-west-1" },
+      env: { ...process.env, CHUTCHUT_BUCKET: "chutchut-inbound-test", CHUTCHUT_MODE: "tafs", AWS_REGION: "eu-west-1", CHUTCHUT_RECIPIENTS: "support@kiff.test, billing@kiff.test" },
     }).toString());
     const actions = (p: { Statement: { Action: string | string[]; Resource: string }[] }) =>
       p.Statement.filter((s) => !String(s.Resource).includes(":logs:")).flatMap((s) => ([] as string[]).concat(s.Action).map((a) => `${a} ${s.Resource}`)).sort();
@@ -101,8 +101,11 @@ describe("deploy", () => {
       `dynamodb:GetItem ${table}`, `dynamodb:UpdateItem ${table}`, "sns:Publish arn:aws:sns:eu-west-1:000000000000:chutchut-alerts",
       "ssm:GetParameter arn:aws:ssm:eu-west-1:000000000000:parameter/chutchut/webhook-secret",
     ]);
-    expect(actions(tafs.provider)).toEqual([
-      `dynamodb:GetItem ${table}`, "s3:GetObject arn:aws:s3:::chutchut-inbound-test/in/*", "ssm:GetParameter arn:aws:ssm:eu-west-1:000000000000:parameter/chutchut/read-key",
+    const send = tafs.provider.Statement.find((x: { Sid: string }) => x.Sid === "SendReplies");
+    expect(send).toMatchObject({ Action: "ses:SendEmail", Resource: ["arn:aws:ses:eu-west-1:000000000000:identity/kiff.test"] });
+    expect(actions({ Statement: tafs.provider.Statement.filter((x: { Sid: string }) => x.Sid !== "SendReplies") })).toEqual([
+      `dynamodb:GetItem ${table}`, `dynamodb:UpdateItem ${table}`, "s3:GetObject arn:aws:s3:::chutchut-inbound-test/in/*",
+      "ssm:GetParameter arn:aws:ssm:eu-west-1:000000000000:parameter/chutchut/read-key",
     ]);
     expect(policies).not.toHaveProperty("provider");
   });

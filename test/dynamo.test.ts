@@ -1,6 +1,6 @@
 import { ConditionalCheckFailedException, GetItemCommand, PutItemCommand, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
 import { describe, expect, it } from "vitest";
-import { dynamoStore } from "../src/dynamo.js";
+import { dynamoSending, dynamoStore } from "../src/dynamo.js";
 
 const now = () => new Date("2026-11-27T18:00:00Z");
 const purgeAt = "2026-12-27T18:00:00.000Z";
@@ -71,6 +71,26 @@ describe("dynamo store", () => {
     expect(await store.bump("2026-11-27:in")).toBe(1);
     expect(await store.bump("2026-11-27:in")).toBe(2);
     expect(db.items.get("count#2026-11-27:in")!.expiresAt).toEqual({ N: String(Date.parse("2026-11-29T18:00:00Z") / 1000) });
+  });
+
+  it("keeps a thread key only for a sender proven here, so a forged From can never be replied to", async () => {
+    const db = fake();
+    const store = dynamoStore(db, "t", now);
+    const auth = { spf: "pass", dkim: "pass", dmarc: "pass" };
+    await store.file({ messageId: "p1", objectKey: "in/p1", at: now().toISOString(), purgeAt, state: "pending_scan", from: "ana@example.test", recipient: "support@kiff.test", rfcId: "<p1@example.test>", auth });
+    await store.file({ messageId: "k1", objectKey: "in/k1", at: now().toISOString(), purgeAt, state: "knock", shown: true, from: "forged@example.test", recipient: "support@kiff.test", rfcId: "<k1@example.test>" });
+    expect(db.items.get("mid#<p1@example.test>")).toMatchObject({ from: { S: "ana@example.test" }, recipient: { S: "support@kiff.test" } });
+    expect(db.items.has("mid#<k1@example.test>")).toBe(false);
+  });
+
+  it("lets a send key left sending after the function died be claimed again, two minutes on", async () => {
+    const sent: UpdateItemCommand[] = [];
+    const db = { async send(c: UpdateItemCommand): Promise<any> { sent.push(c); return { Attributes: { state: { S: "sending" } } }; } };
+    expect(await dynamoSending(db, "t", now).claim("run-1:reply")).toBe("retry");
+    expect(sent[0]!.input).toMatchObject({
+      ConditionExpression: "attribute_not_exists(pk) OR #s = :failed OR (#s = :sending AND claimedAt < :stale)",
+      ExpressionAttributeValues: { ":stale": { N: String(Date.parse("2026-11-27T18:00:00Z") / 1000 - 120) } },
+    });
   });
 
   it("passes on a failure, so the webhook answers 500 and SNS sends it again", async () => {

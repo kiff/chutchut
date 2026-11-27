@@ -16,7 +16,8 @@ import { mailboxes, sender } from "./from.js";
  */
 export interface Auth { spf: string; dkim: string; dmarc: string }
 
-export type Route = { to: Door; messageId: string; objectKey: string; recipient: string; from: string | undefined; auth: Auth | null }
+/** `rfcId`: the message's own Message-ID as SES read it, which a reply names in In-Reply-To. */
+export type Route = { to: Door; messageId: string; objectKey: string; recipient: string; from: string | undefined; auth: Auth | null; rfcId?: string }
   | { to: "held" | "refused"; messageId: string; objectKey: string; recipient: string; why: string };
 
 interface Verdict { status?: string }
@@ -26,7 +27,7 @@ interface Received {
     messageId?: string;
     headersTruncated?: boolean;
     headers?: { name?: string; value?: string }[];
-    commonHeaders?: { from?: unknown };
+    commonHeaders?: { from?: unknown; messageId?: unknown };
   };
   receipt?: {
     recipients?: unknown;
@@ -77,5 +78,7 @@ export function route(message: string, paired: Pairing, bucket: string): Route |
   // Sent on only for a sender proven here (one From read as SES reads it, DMARC passed, spam clean): anything else
   // reaches tafs with none, so it can only knock there, never be paired on a looser reading.
   const auth = from === undefined || !aligned ? null : { spf: lower(n.receipt?.spfVerdict), dkim: lower(n.receipt?.dkimVerdict), dmarc: lower(n.receipt?.dmarcVerdict) };
-  return { to: from === undefined ? "knock" : door({ address: from, dmarcAligned: aligned }, paired), messageId, objectKey, recipient, from, auth };
+  const mid = n.mail?.commonHeaders?.messageId;
+  const rfcId = typeof mid === "string" && /^<[^<>\s]{1,250}>$/.test(mid.trim()) ? { rfcId: mid.trim() } : {};
+  return { to: from === undefined ? "knock" : door({ address: from, dmarcAligned: aligned }, paired), messageId, objectKey, recipient, from, auth, ...rfcId };
 }
