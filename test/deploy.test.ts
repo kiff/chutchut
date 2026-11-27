@@ -89,6 +89,7 @@ case "$args" in
   *"kms describe-key"*) echo key-1 ;;
   *"sns create-topic"*) echo arn:aws:sns:eu-west-1:000000000000:chutchut-inbound ;;
   *"iam get-role"*"Role.Arn"*) echo arn:aws:iam::000000000000:role/chutchut-malware-scan ;;
+  *"describe-time-to-live"*) echo ENABLED ;;
 esac
 exit 0
 `);
@@ -105,8 +106,8 @@ exit 0
     expect(run.out).toContain("chutchut inbound: bucket chutchut-inbound-test");
   });
 
-  it.skipIf(!modern)("stops, and never reports success, when a call inside $(topic) fails", () => {
-    for (const failOn of ["SignatureVersion", "KmsMasterKeyId", "put-key-policy", "--attribute-name Policy"]) {
+  it.skipIf(!modern)("stops, and never reports success, when a call inside $(topic) or the table's setup fails", () => {
+    for (const failOn of ["SignatureVersion", "KmsMasterKeyId", "put-key-policy", "--attribute-name Policy", "update-continuous-backups"]) {
       const run = upWithStub(failOn);
       expect(run.status, failOn).not.toBe(0);
       expect(run.out, failOn).not.toContain("chutchut inbound:");

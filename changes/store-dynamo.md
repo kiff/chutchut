@@ -1,0 +1,1 @@
+- **What the webhook files is kept in DynamoDB.** One table (`deploy/aws.sh`, on-demand, encrypted, point-in-time recovery and deletion protection on): each message filed once by a conditional put on its id, a knock removed after its 30 days, a day's counter after two. A message's body is never stored there.
