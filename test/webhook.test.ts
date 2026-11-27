@@ -58,7 +58,7 @@ function setup(limits: Partial<Webhook["limits"]> = {}, failures = 0) {
   const w: Webhook = {
     sns: { topicArn, now: () => now, certificate: async () => pem },
     bucket, store, paired: async () => pairing(["ana@example.test"]),
-    limits: { inboundPerDay: 100, knocksPerSender: 1, knocksPerDomain: 3, knocksPerDay: 50, ...limits },
+    limits: { inboundPerDay: 100, accountPerDay: 1000, knocksPerSender: 1, knocksPerDomain: 3, knocksPerDay: 50, ...limits },
     confirm: async (url) => { confirmed.push(url); },
   };
   return { w, store, confirmed };
@@ -116,6 +116,12 @@ describe("webhook", () => {
       await webhook(mail(id!, from!), w);
     }
     expect(store.items.map((f) => (f.state === "knock" && f.shown ? f.messageId : "-")).join("")).toBe("a--d-f-");
+  });
+
+  it("gives no fresh room to mail spread over many addresses of ours: the account's cap and the knock caps count across them", async () => {
+    const { w, store } = setup({ accountPerDay: 3, knocksPerSender: 1, knocksPerDomain: 2 });
+    for (let i = 1; i <= 5; i++) await webhook(mail(`s${i}`, "x@spam.test", {}, `a${i}@example.test`), w);
+    expect(store.items.map((f) => (f.state === "knock" ? (f.shown ? "shown" : "digest") : f.state))).toEqual(["shown", "digest", "digest", "held", "held"]);
   });
 
   it("counts every cap per address of ours, so one busy address never holds another's mail", async () => {
