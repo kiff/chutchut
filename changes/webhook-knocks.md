@@ -1,0 +1,1 @@
+- **Mail reaches the webhook and is filed, never lost.** Each SNS message is checked first; a paired sender's mail waits for its malware scan; a stranger's knocks for 30 days, shown once a day per sender within the domain's and the day's caps, the rest kept for the digest; mail past the day's cap is held. SNS's subscription is confirmed only for loge's own topic.
