@@ -23,7 +23,8 @@ export async function handler(event: UrlEvent) {
   if (!MESSAGE_ID.test(id)) return answer(400, { error: "not an email id" });
   const got = await db.send(new GetItemCommand({
     TableName: c.table, Key: { pk: { S: `msg#${id}` } }, ConsistentRead: true,
-    ProjectionExpression: "#s, #at, shown, clean, auth, objectKey, purgeAt", ExpressionAttributeNames: { "#s": "state", "#at": "at" },
+    ProjectionExpression: "#s, #at, shown, clean, auth, objectKey, purgeAt, #from, recipient",
+    ExpressionAttributeNames: { "#s": "state", "#at": "at", "#from": "from" },
   }));
   const i = got.Item;
   const item = i && { state: i.state?.S ?? "", shown: i.shown?.S === "yes", clean: i.clean?.S === "yes" };
@@ -32,5 +33,9 @@ export async function handler(event: UrlEvent) {
   const obj = await s3.send(new GetObjectCommand({ Bucket: c.bucket, Key: i.objectKey?.S ?? `in/${id}` }));
   const raw = Buffer.from(await obj.Body!.transformToByteArray());
   const auth = i.auth?.S !== undefined ? (JSON.parse(i.auth.S) as Auth) : undefined;
-  return answer(200, await receivedJson(id, raw, { at: i.at?.S ?? "", ...(auth ? { auth } : {}) }));
+  const filed = {
+    at: i.at?.S ?? "", ...(auth ? { auth } : {}),
+    ...(i.from?.S !== undefined ? { from: i.from.S } : {}), ...(i.recipient?.S !== undefined ? { recipient: i.recipient.S } : {}),
+  };
+  return answer(200, await receivedJson(id, raw, filed));
 }

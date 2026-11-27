@@ -430,6 +430,8 @@ scan
 for f in $FUNCTIONS; do function_up "$f" "$arn" "$alerts_arn"; done
 # The public webhook can't take more than a few at once, so a flood can't run up the table or the account's Lambda room.
 aws lambda put-function-concurrency --function-name "$NAME-webhook" --reserved-concurrent-executions 10 >/dev/null
+# tafs's read and send take the provider's public URL: at most 10 at once too.
+[[ "$MODE_" == tafs ]] && aws lambda put-function-concurrency --function-name "$NAME-provider" --reserved-concurrent-executions 10 >/dev/null
 # A scan result the reader couldn't handle after EventBridge's retries is raised on the alerts topic, never dropped.
 aws lambda put-function-event-invoke-config --function-name "$NAME-reader" --maximum-retry-attempts 2 \
   --destination-config "{\"OnFailure\":{\"Destination\":\"$alerts_arn\"}}" >/dev/null

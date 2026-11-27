@@ -48,6 +48,7 @@ export function dynamoStore(client: Pick<DynamoDBClient, "send">, table: string,
       };
       if (item.from !== undefined) fields.from = { S: item.from };
       if (item.auth !== undefined) fields.auth = { S: JSON.stringify(item.auth) };
+      if (item.recipient !== undefined) fields.recipient = { S: item.recipient };
       if (item.state === "knock") fields.shown = { S: item.shown ? "yes" : "no" };
       if (item.state === "held" || item.state === "refused") fields.why = { S: item.why };
       try {

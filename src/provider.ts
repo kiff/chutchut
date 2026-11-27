@@ -41,15 +41,22 @@ export function authorized(header: string | undefined, keySha256: string): boole
 export const MESSAGE_ID = /^[A-Za-z0-9-]{1,100}$/;
 
 /** One readable message as tafs cloud's `parseReceived` reads it. */
-export async function receivedJson(messageId: string, raw: Buffer, filed: { at: string; auth?: Auth }): Promise<Record<string, unknown>> {
+/**
+ * `filed` is what chutchut proved and filed: the sender's address (for a proven sender), SES's sender check, and the
+ * address of ours SES delivered it to. tafs reads the sender and the door from these, never from a looser reading of
+ * the raw headers: the From is the filed address, and the door is the address SES delivered to (so mail Bcc'd or
+ * forwarded to a door still reaches it, and a To header naming another door can't win over the real delivery).
+ */
+export async function receivedJson(messageId: string, raw: Buffer, filed: { at: string; auth?: Auth; from?: string; recipient?: string }): Promise<Record<string, unknown>> {
   const m = await simpleParser(raw, { skipHtmlToText: false, skipImageLinks: true, skipTextToHtml: true });
   const one = (v: unknown) => (typeof v === "string" ? v : Array.isArray(v) ? (typeof v[0] === "string" ? v[0] : "") : "");
   const header = (name: string) => one(m.headers.get(name));
   const list = (a: unknown) => (Array.isArray(a) ? a : a ? [a] : []).flatMap((x: { value?: { address?: string }[] }) => x.value ?? []).map((v) => v.address ?? "").filter((x) => x !== "");
   return {
     id: messageId,
-    from: m.from?.text ?? "",
-    to: list(m.to),
+    from: filed.from ?? m.from?.text ?? "",
+    to: filed.recipient !== undefined && filed.recipient !== "(no recipient)" ? [filed.recipient] : list(m.to),
+    ...(filed.recipient !== undefined && filed.recipient !== "(no recipient)" ? { received_for: [filed.recipient] } : {}),
     subject: m.subject ?? "",
     message_id: m.messageId ?? "",
     text: typeof m.text === "string" ? m.text : null,
@@ -57,7 +64,12 @@ export async function receivedJson(messageId: string, raw: Buffer, filed: { at: 
     headers: { references: one(m.references !== undefined ? [].concat(m.references as never).join(" ") : header("references")), "in-reply-to": m.inReplyTo ?? "" },
     attachments: m.attachments.map((a) => ({ content_disposition: a.contentDisposition ?? "attachment" })),
     // Only for a sender proven here: anything else reaches tafs with none, so it can only knock there.
-    authentication: filed.auth ?? null,
+    authentication: filed.auth !== undefined && agrees(m.from?.value, filed.from) ? filed.auth : null,
     created_at: filed.at,
   };
+}
+
+/** Whether the raw message's own From names exactly the proven address: if the readings differ, no sender check goes. */
+function agrees(raw: { address?: string }[] | undefined, proven: string | undefined): boolean {
+  return proven !== undefined && raw?.length === 1 && (raw[0]?.address ?? "").toLowerCase() === proven.toLowerCase();
 }
