@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# loge's inbound mail on AWS, in eu-west-1: one S3 bucket for the raw messages, one SNS topic that tells loge a
+# message arrived, one SES receipt rule that writes each message to the bucket and notifies the topic, and GuardDuty
+# scanning each message for malware. Idempotent: a rerun brings each piece back to what this file says. It never
+# prints an account id or an ARN, and it removes nothing.
+#
+#   deploy/aws.sh up         create or update everything above
+#   deploy/aws.sh policies   print the policies it would set, as JSON, without calling AWS (for review and tests)
+#
+# Environment:
+#   LOGE_BUCKET       the bucket's name (required: bucket names are global)
+#   LOGE_RECIPIENTS   the addresses or domains SES receives for, comma-separated (required for up)
+#   LOGE_NAME         the prefix for the topic, the rule set, the rule and the scan's role (default loge)
+#   AWS_REGION        default eu-west-1, where SES receives mail
+#   LOGE_ACTIVATE     "yes" makes loge's rule set the region's active one. SES has one active rule set per region, so
+#                     this replaces any other: it's off unless asked for.
+#
+# The bucket:
+#   - Block Public Access on every setting, and a policy that refuses any request not over TLS;
+#   - only SES may write, only under in/, and only for this account's own rule (aws:SourceAccount, aws:SourceArn), so
+#     another account's SES can't write here (the confused deputy);
+#   - encrypted at rest (SSE-S3), and raw messages under in/ are deleted after 30 days: the mail a person keeps lives
+#     in loge's own store, not here.
+# The topic signs with SHA256 (SignatureVersion 2), the only version loge's webhook accepts, and only SES from this
+# account, for this rule, may publish to it. The rule requires TLS from the sending server and asks SES for its spam
+# and virus verdicts. GuardDuty Malware Protection for S3 scans each new object under in/ and tags it with the result.
+set -euo pipefail
+
+MODE=${1:-}
+REGION=${AWS_REGION:-eu-west-1}
+NAME=${LOGE_NAME:-loge}
+BUCKET=${LOGE_BUCKET:?LOGE_BUCKET names the bucket}
+TOPIC=$NAME-inbound
+RULE_SET=$NAME
+RULE=$NAME-inbound
+SCAN_ROLE=$NAME-malware-scan
+PREFIX=in/
+DAYS=30
+
+aws() ( command aws --region "$REGION" --output text "$@" )
+
+bucket_policy() { # account
+  cat <<JSON
+{"Version":"2012-10-17","Statement":[
+ {"Sid":"TlsOnly","Effect":"Deny","Principal":"*","Action":"s3:*",
+  "Resource":["arn:aws:s3:::$BUCKET","arn:aws:s3:::$BUCKET/*"],
+  "Condition":{"Bool":{"aws:SecureTransport":"false"}}},
+ {"Sid":"SesWritesOnlyForThisRule","Effect":"Allow","Principal":{"Service":"ses.amazonaws.com"},"Action":"s3:PutObject",
+  "Resource":"arn:aws:s3:::$BUCKET/$PREFIX*",
+  "Condition":{"StringEquals":{"aws:SourceAccount":"$1"},
+   "ArnLike":{"aws:SourceArn":"arn:aws:ses:$REGION:$1:receipt-rule-set/$RULE_SET:receipt-rule/$RULE"}}}
+]}
+JSON
+}
+
+topic_policy() { # account topic-arn
+  cat <<JSON
+{"Version":"2012-10-17","Statement":[
+ {"Sid":"SesPublishesOnlyForThisRule","Effect":"Allow","Principal":{"Service":"ses.amazonaws.com"},"Action":"SNS:Publish",
+  "Resource":"$2",
+  "Condition":{"StringEquals":{"AWS:SourceAccount":"$1"},
+   "ArnLike":{"AWS:SourceArn":"arn:aws:ses:$REGION:$1:receipt-rule-set/$RULE_SET:receipt-rule/$RULE"}}}
+]}
+JSON
+}
+
+lifecycle() {
+  cat <<JSON
+{"Rules":[{"ID":"raw-mail-$DAYS-days","Status":"Enabled","Filter":{"Prefix":"$PREFIX"},"Expiration":{"Days":$DAYS}}]}
+JSON
+}
+
+scan_trust() {
+  cat <<JSON
+{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"malware-protection-plan.guardduty.amazonaws.com"},
+ "Action":"sts:AssumeRole"}]}
+JSON
+}
+
+# What GuardDuty needs to scan and tag objects under in/ in this bucket, and nothing else.
+scan_policy() { # account
+  cat <<JSON
+{"Version":"2012-10-17","Statement":[
+ {"Sid":"Events","Effect":"Allow","Action":["events:PutRule","events:DeleteRule","events:PutTargets","events:RemoveTargets"],
+  "Resource":"arn:aws:events:$REGION:$1:rule/DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3*",
+  "Condition":{"StringLike":{"events:ManagedBy":"malware-protection-plan.guardduty.amazonaws.com"}}},
+ {"Sid":"EventsRead","Effect":"Allow","Action":["events:DescribeRule","events:ListTargetsByRule"],
+  "Resource":"arn:aws:events:$REGION:$1:rule/DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3*"},
+ {"Sid":"Notifications","Effect":"Allow","Action":["s3:PutBucketNotification","s3:GetBucketNotification"],
+  "Resource":"arn:aws:s3:::$BUCKET"},
+ {"Sid":"Validation","Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::$BUCKET/malware-protection-resource-validation-object"},
+ {"Sid":"ScanAndTag","Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion","s3:PutObjectTagging","s3:GetObjectTagging","s3:PutObjectVersionTagging","s3:GetObjectVersionTagging"],
+  "Resource":"arn:aws:s3:::$BUCKET/$PREFIX*"}
+]}
+JSON
+}
+
+if [[ "$MODE" == policies ]]; then
+  # A made-up account, so the shapes can be read and tested with no AWS access.
+  account=000000000000 arn="arn:aws:sns:$REGION:000000000000:$TOPIC"
+  printf '%s\n' "{\"bucket\":$(bucket_policy $account),\"topic\":$(topic_policy $account "$arn"),\"lifecycle\":$(lifecycle),\"scan_trust\":$(scan_trust),\"scan\":$(scan_policy $account)}"
+  exit 0
+fi
+[[ "$MODE" == up ]] || { echo "usage: deploy/aws.sh up | policies" >&2; exit 2; }
+RECIPIENTS=${LOGE_RECIPIENTS:?LOGE_RECIPIENTS names the addresses or domains SES receives for}
+ACTIVATE=${LOGE_ACTIVATE:-}
+[[ -z "$ACTIVATE" || "$ACTIVATE" == yes ]] || { echo "LOGE_ACTIVATE is yes or unset" >&2; exit 2; }
+
+ACCOUNT=$(aws sts get-caller-identity --query Account)
+
+bucket() {
+  if ! aws s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1; then
+    aws s3api create-bucket --bucket "$BUCKET" --create-bucket-configuration "LocationConstraint=$REGION" >/dev/null
+  fi
+  aws s3api put-public-access-block --bucket "$BUCKET" --public-access-block-configuration \
+    BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+  aws s3api put-bucket-ownership-controls --bucket "$BUCKET" --ownership-controls 'Rules=[{ObjectOwnership=BucketOwnerEnforced}]'
+  aws s3api put-bucket-encryption --bucket "$BUCKET" --server-side-encryption-configuration \
+    '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"},"BucketKeyEnabled":true}]}'
+  aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --lifecycle-configuration "$(lifecycle)"
+  aws s3api put-bucket-policy --bucket "$BUCKET" --policy "$(bucket_policy "$ACCOUNT")"
+}
+
+topic() { # prints the topic's ARN, for the rule
+  local arn; arn=$(aws sns create-topic --name "$TOPIC" --query TopicArn)
+  aws sns set-topic-attributes --topic-arn "$arn" --attribute-name SignatureVersion --attribute-value 2
+  aws sns set-topic-attributes --topic-arn "$arn" --attribute-name Policy --attribute-value "$(topic_policy "$ACCOUNT" "$arn")"
+  echo "$arn"
+}
+
+rule() { # topic-arn
+  local recipients; recipients=$(printf '%s' "$RECIPIENTS" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | awk 'NF{printf "%s\"%s\"", (n++?",":""), $0}')
+  local body
+  body="{\"Name\":\"$RULE\",\"Enabled\":true,\"TlsPolicy\":\"Require\",\"ScanEnabled\":true,\"Recipients\":[$recipients],
+    \"Actions\":[{\"S3Action\":{\"BucketName\":\"$BUCKET\",\"ObjectKeyPrefix\":\"$PREFIX\",\"TopicArn\":\"$1\"}}]}"
+  if ! aws ses describe-receipt-rule-set --rule-set-name "$RULE_SET" >/dev/null 2>&1; then
+    aws ses create-receipt-rule-set --rule-set-name "$RULE_SET" >/dev/null
+  fi
+  if aws ses describe-receipt-rule --rule-set-name "$RULE_SET" --rule-name "$RULE" >/dev/null 2>&1; then
+    aws ses update-receipt-rule --rule-set-name "$RULE_SET" --rule "$body"
+  else
+    aws ses create-receipt-rule --rule-set-name "$RULE_SET" --rule "$body"
+  fi
+  if [[ "$ACTIVATE" == yes ]]; then
+    aws ses set-active-receipt-rule-set --rule-set-name "$RULE_SET"
+  fi
+}
+
+scan() {
+  if ! aws iam get-role --role-name "$SCAN_ROLE" --query Role.RoleName >/dev/null 2>&1; then
+    aws iam create-role --role-name "$SCAN_ROLE" --assume-role-policy-document "$(scan_trust)" --query Role.RoleName >/dev/null
+    sleep 10 # IAM is eventually consistent
+  fi
+  aws iam put-role-policy --role-name "$SCAN_ROLE" --policy-name scan --policy-document "$(scan_policy "$ACCOUNT")"
+  local role_arn; role_arn=$(aws iam get-role --role-name "$SCAN_ROLE" --query Role.Arn)
+  local plans; plans=$(aws guardduty list-malware-protection-plans --query 'MalwareProtectionPlans[].MalwareProtectionPlanId')
+  local plan=""
+  for id in $plans; do
+    if [[ "$(aws guardduty get-malware-protection-plan --malware-protection-plan-id "$id" --query ProtectedResource.S3Bucket.BucketName)" == "$BUCKET" ]]; then plan=$id; fi
+  done
+  if [[ -z "$plan" ]]; then
+    aws guardduty create-malware-protection-plan --role "$role_arn" \
+      --protected-resource "{\"S3Bucket\":{\"BucketName\":\"$BUCKET\",\"ObjectPrefixes\":[\"$PREFIX\"]}}" \
+      --actions '{"Tagging":{"Status":"ENABLED"}}' --query MalwareProtectionPlanId >/dev/null
+  fi
+}
+
+bucket
+arn=$(topic)
+rule "$arn"
+scan
+echo "loge inbound: bucket $BUCKET, topic $TOPIC, rule $RULE_SET/$RULE in $REGION$([[ "$ACTIVATE" == yes ]] && echo ', active' || echo ', not active')"

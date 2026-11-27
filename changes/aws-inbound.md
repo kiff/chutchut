@@ -1,0 +1,1 @@
+- **loge's inbound mail on AWS, as code** (`deploy/aws.sh up`): an S3 bucket that only SES may write to, for this account's own rule, with raw mail deleted after 30 days; an SNS topic signed with SHA256; an SES receipt rule that requires TLS and asks for spam and virus verdicts; and GuardDuty scanning each message for malware. Applied by its owner, never by CI.
