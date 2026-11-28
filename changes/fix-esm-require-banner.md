@@ -1,0 +1,1 @@
+- **The reader and the read API load again on Lambda.** The bundles are ES modules, and a mail-parsing dependency calls `require("stream")`, which an ES module bundle refused at start ("Dynamic require of \"stream\" is not supported"). The build now gives each bundle a real `require`, so no message waits on a function that can't start.
