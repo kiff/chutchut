@@ -135,15 +135,30 @@ describe("deploy", () => {
     expect(run({ CHUTCHUT_PAIRED: "ana@example.test", CHUTCHUT_DIST: "/nonexistent" })).toBe(2);
   });
 
-  it("asks for a bucket and refuses an unknown mode", () => {
+  it("asks for a bucket, refuses an unknown mode, and runs down only when asked by name", () => {
     expect(() => execFileSync("bash", ["deploy/aws.sh", "policies"], { env: { PATH: process.env.PATH }, stdio: "pipe" })).toThrow();
-    expect(() => execFileSync("bash", ["deploy/aws.sh", "down"], { env: { PATH: process.env.PATH, CHUTCHUT_BUCKET: "b" }, stdio: "pipe" })).toThrow();
+    expect(spawnSync("bash", ["deploy/aws.sh", "sideways"], { env: { PATH: "/usr/bin:/bin", CHUTCHUT_BUCKET: "b" } }).status).toBe(2);
+    // No CHUTCHUT_DOWN=yes: refused before any aws call (PATH has no aws here).
+    expect(spawnSync("bash", ["deploy/aws.sh", "down"], { env: { PATH: "/usr/bin:/bin", CHUTCHUT_BUCKET: "b" } }).status).toBe(2);
+  });
+
+  it("puts the rule in a named rule set, and refuses a name that isn't one", () => {
+    const shared = JSON.parse(execFileSync("bash", ["deploy/aws.sh", "policies"], {
+      env: { ...process.env, CHUTCHUT_BUCKET: "chutchut-inbound-test", AWS_REGION: "eu-west-1", CHUTCHUT_RULE_SET: "shared-set" },
+    }).toString());
+    const sharedRule = "arn:aws:ses:eu-west-1:000000000000:receipt-rule-set/shared-set:receipt-rule/chutchut-inbound";
+    expect(JSON.stringify(shared.bucket)).toContain(sharedRule);
+    expect(JSON.stringify(shared.topic)).toContain(sharedRule);
+    expect(JSON.stringify(shared.topic_key)).toContain(sharedRule);
+    expect(spawnSync("bash", ["deploy/aws.sh", "policies"], {
+      env: { PATH: "/usr/bin:/bin", CHUTCHUT_BUCKET: "b", CHUTCHUT_RULE_SET: 'a"b' },
+    }).status).toBe(2);
   });
 
   // `up` against a stand-in for the aws command (never AWS itself): a failure inside $(topic) must stop the run, so
   // inherit_errexit can't be dropped without this going red. It needs bash 4.4 or later, as `up` does.
   const modern = spawnSync("bash", ["-c", "shopt -s inherit_errexit"]).status === 0;
-  function upWithStub(failOn: string): { status: number | null; out: string } {
+  function upWithStub(failOn: string, extra: Record<string, string> = {}): { status: number | null; out: string } {
     const dir = mkdtempSync(join(tmpdir(), "chutchut-aws-"));
     writeFileSync(join(dir, "aws"), `#!/usr/bin/env bash
 args="$*"
@@ -163,16 +178,64 @@ exit 0
     const run = spawnSync("bash", ["deploy/aws.sh", "up"], {
       env: {
         PATH: `${dir}:${process.env.PATH}`, CHUTCHUT_BUCKET: "chutchut-inbound-test", CHUTCHUT_RECIPIENTS: "support@example.test",
-        CHUTCHUT_DIST: dir, CHUTCHUT_PAIRED: "ana@example.test",
+        CHUTCHUT_DIST: dir, CHUTCHUT_PAIRED: "ana@example.test", ...extra,
       },
     });
     return { status: run.status, out: run.stdout.toString() };
   }
 
+  // `down` against a stand-in that answers as if everything `up` made were there, and logs each call.
+  function downWithStub(): { status: number | null; out: string; calls: string[] } {
+    const dir = mkdtempSync(join(tmpdir(), "chutchut-aws-"));
+    writeFileSync(join(dir, "aws"), `#!/usr/bin/env bash
+args="$*"
+echo "$args" >>"${dir}/calls"
+case "$args" in
+  *"sts get-caller-identity"*) echo 000000000000 ;;
+  *"describe-active-receipt-rule-set"*) echo shared-set ;;
+  *"list-targets-by-rule"*) echo reader ;;
+  *"list-role-policies"*) echo inline ;;
+  *"list-malware-protection-plans"*) echo plan-1 ;;
+  *"get-malware-protection-plan"*) echo chutchut-inbound-test ;;
+  *"kms describe-key"*) echo key-1 ;;
+esac
+exit 0
+`);
+    chmodSync(join(dir, "aws"), 0o755);
+    const run = spawnSync("bash", ["deploy/aws.sh", "down"], {
+      env: { PATH: `${dir}:${process.env.PATH}`, CHUTCHUT_BUCKET: "chutchut-inbound-test", CHUTCHUT_RULE_SET: "shared-set", CHUTCHUT_DOWN: "yes" },
+    });
+    const calls = spawnSync("cat", [join(dir, "calls")]).stdout.toString().trim().split("\n");
+    return { status: run.status, out: run.stdout.toString(), calls };
+  }
+
+  it("down stops the mail first, never touches the shared set, and keeps the bucket and the table (against a stand-in)", () => {
+    const run = downWithStub();
+    expect(run.status).toBe(0);
+    const changes = run.calls.filter((c) => /\b(delete|remove|schedule)-/.test(c));
+    expect(changes[0]).toContain("ses delete-receipt-rule --rule-set-name shared-set --rule-name chutchut-inbound");
+    expect(run.calls.some((c) => c.includes("delete-receipt-rule-set") || c.includes("set-active-receipt-rule-set"))).toBe(false);
+    for (const fn of ["webhook", "reader", "stale", "provider"]) {
+      expect(changes.some((c) => c.endsWith(`lambda delete-function --function-name chutchut-${fn}`)), fn).toBe(true);
+      expect(changes.some((c) => c.endsWith(`iam delete-role --role-name chutchut-${fn}`)), fn).toBe(true);
+    }
+    expect(changes.some((c) => c.endsWith("guardduty delete-malware-protection-plan --malware-protection-plan-id plan-1"))).toBe(true);
+    expect(changes.some((c) => c.includes("kms schedule-key-deletion") && c.includes("--pending-window-in-days 7"))).toBe(true);
+    expect(run.calls.some((c) => /delete-bucket|s3 rm|delete-object|dynamodb delete-table|delete-log-group/.test(c))).toBe(false);
+    expect(run.out).not.toMatch(/000000000000|arn:/);
+    expect(run.out).toContain("kept: bucket chutchut-inbound-test and table chutchut-mail");
+  }, 20_000); // a few dozen stand-in calls: slow under a parallel run
+
   it.skipIf(!modern)("runs to the end when every call succeeds (against a stand-in, never AWS)", () => {
     const run = upWithStub("never-matches");
     expect(run.status).toBe(0);
     expect(run.out).toContain("chutchut inbound: bucket chutchut-inbound-test");
+  });
+
+  it.skipIf(!modern)("refuses a named rule set that doesn't exist, and never creates it (against a stand-in)", () => {
+    const run = upWithStub("describe-receipt-rule-set --rule-set-name shared-st", { CHUTCHUT_RULE_SET: "shared-st" });
+    expect(run.status).toBe(3);
+    expect(run.out).not.toContain("chutchut inbound:");
   });
 
   it.skipIf(!modern)("stops, and never reports success, when a call inside $(topic) or the table's setup fails", () => {
