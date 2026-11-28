@@ -43,6 +43,9 @@ describe("deploy", () => {
     expect(policies.scan_trust.Statement[0].Principal).toEqual({ Service: "malware-protection-plan.guardduty.amazonaws.com" });
     const objects = policies.scan.Statement.find((s: { Sid: string }) => s.Sid === "ScanAndTag");
     expect(objects.Resource).toBe("arn:aws:s3:::chutchut-inbound-test/in/*");
+    // GuardDuty checks the bucket's owner with ListBucket before it makes the plan; without it the plan is refused.
+    expect(policies.scan.Statement.find((s: { Sid: string }) => s.Sid === "CheckBucketOwnership"))
+      .toMatchObject({ Effect: "Allow", Action: "s3:ListBucket", Resource: "arn:aws:s3:::chutchut-inbound-test" });
     for (const s of policies.scan.Statement) {
       expect(JSON.stringify(s.Resource)).not.toBe('"*"');
       expect(([] as string[]).concat(s.Action).some((a) => a === "s3:DeleteObject" || a === "s3:*")).toBe(false);
