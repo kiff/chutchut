@@ -11,7 +11,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "build": "esbuild src/lambda/webhook.ts src/lambda/reader.ts src/lambda/stale.ts src/lambda/provider.ts --bundle --platform=node --target=node22 --format=esm --outdir=dist --out-extension:.js=.mjs --external:@aws-sdk/* --sourcemap"
+    "build": "node scripts/build.mjs"
   },
   "devDependencies": {
     "@types/mailparser": "3.9.0",

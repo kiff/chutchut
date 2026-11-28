@@ -1,0 +1,1 @@
+- **Every function that reads mail loads again.** The deployed bundles are ES modules, and a dependency of the mail parser calls `require` as CommonJS, so the reader crashed at load on every message ("Dynamic require of \"stream\" is not supported"). The bundles now carry a `require` of their own, and a test parses a real message with the built bundle in plain Node.
