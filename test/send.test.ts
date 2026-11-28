@@ -3,7 +3,7 @@ import { sendReply, type Reply, type Sending } from "../src/send.js";
 
 const now = new Date("2026-11-27T18:00:00Z");
 
-function setup(over: Partial<{ state: string; shown: boolean; clean: boolean; purgeAt: string; perDay: number; accountPerDay: number; noticesPerDay: number; failSend: number }> = {}) {
+function setup(over: Partial<{ state: string; shown: boolean; clean: boolean; purgeAt: string; perDay: number; accountPerDay: number; noticesPerDay: number; noticesPerRecipient: number; failSend: number }> = {}) {
   const sent: unknown[] = [];
   const keys = new Map<string, "sending" | "sent" | "failed">();
   const counts = new Map<string, number>();
@@ -25,7 +25,8 @@ function setup(over: Partial<{ state: string; shown: boolean; clean: boolean; pu
     async transport(r) { if (failing > 0) { failing -= 1; throw new Error("ses down"); } sent.push(r); },
     perDay: over.perDay ?? 100,
     accountPerDay: over.accountPerDay ?? 1000,
-    noticesPerDay: over.noticesPerDay ?? 50,
+    noticesPerDay: over.noticesPerDay ?? 5000,
+    noticesPerRecipient: over.noticesPerRecipient ?? 100,
     entries: ["kiff.test"],
     now: () => now,
   };
@@ -125,6 +126,14 @@ describe("send", () => {
     expect(await sendReply(notice({ idempotencyKey: "door-owner:1" }), s)).toEqual({ status: 200, said: "sent" });
     expect(await sendReply(notice({ idempotencyKey: "door-owner:2" }), s)).toMatchObject({ status: 429, said: "over the day's notices" });
     expect(sent).toHaveLength(1);
+  });
+
+  it("caps notices to any one address apart from the total, so one busy owner never takes another's", async () => {
+    const { s, sent } = setup({ noticesPerRecipient: 1 });
+    expect(await sendReply(notice({ idempotencyKey: "door-owner:1" }), s)).toEqual({ status: 200, said: "sent" });
+    expect(await sendReply(notice({ idempotencyKey: "door-owner:2" }), s)).toMatchObject({ status: 429, said: "over the day's notices to this address" });
+    expect(await sendReply(notice({ idempotencyKey: "door-owner:3", to: ["other@company.test"] }), s)).toEqual({ status: 200, said: "sent" });
+    expect(sent).toHaveLength(2);
   });
 
   it("keeps a reply a reply: without notice, a mail that answers no message is still refused", async () => {

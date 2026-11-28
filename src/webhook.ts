@@ -32,8 +32,10 @@ export interface Limits {
   knocksPerDomain: number;
   /** Knocks shown a day in all; the rest go to the digest. */
   knocksPerDay: number;
-  /** Notices sent a day for the whole account (send.ts): tafs's own mail to one address, never a reply. */
+  /** Notices sent a day in all (send.ts): tafs's own mail to one address, never a reply, every account's together. */
   noticesPerDay: number;
+  /** Notices sent a day to any one address: an owner's copies, or support's reports. */
+  noticesPerRecipient: number;
 }
 
 export type Filed = {

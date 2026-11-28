@@ -18,7 +18,9 @@ import { entry } from "./webhook.js";
  * **A notice** (`notice: true`) is tafs's own mail that answers no message: the copy of a door's answer to the account's
  * owner, an answer report to support. tafs asks for it by name, with its read key, and chooses the recipient. It goes to
  * one address, from one of the addresses we receive for, never threaded, once per idempotency key, and under its own day's
- * cap for the account (`noticesPerDay`), apart from replies.
+ * caps, apart from replies: one in all (`noticesPerDay`, every account's together, since one chutchut serves tafs for every
+ * account) and one for each recipient (`noticesPerRecipient`), so a busy day elsewhere never takes an owner's copy, and a
+ * leaked key reaches no one address more than that.
  */
 export interface Reply {
   from: string;
@@ -47,8 +49,10 @@ export interface Sending {
   perDay: number;
   /** Replies a day for the whole account, all addresses together. */
   accountPerDay: number;
-  /** Notices a day for the whole account. */
+  /** Notices a day in all, every account's together. */
   noticesPerDay: number;
+  /** Notices a day to any one address. */
+  noticesPerRecipient: number;
   /** The addresses and domains we receive for: the send cap counts by the entry an address matches. */
   entries: string[];
   now: () => Date;
@@ -104,7 +108,7 @@ export async function sendReply(r: Reply, s: Sending): Promise<Sent> {
   return { status: 200, said: "sent" };
 }
 
-/** A notice (see above): from one of our addresses, to one, never threaded, under the account's own notice cap. */
+/** A notice (see above): from one of our addresses, to one, never threaded, under its two day's caps. */
 async function sendNotice(key: string, from: string, to: string, subject: string, text: string, s: Sending): Promise<Sent> {
   const ours = s.entries.map((e) => e.trim().toLowerCase());
   if (!ours.includes(entry(from, ours))) return { status: 403, said: "only from an address of ours" };
@@ -112,9 +116,12 @@ async function sendNotice(key: string, from: string, to: string, subject: string
   if (claimed === "sent") return { status: 200, said: "sent before" };
   if (claimed === "busy") return { status: 409, said: "being sent" };
   const day = s.now().toISOString().slice(0, 10);
-  if ((await s.bump(`${day}:notices`)) > s.noticesPerDay) {
+  // Both are counted for each notice, as replies' caps are.
+  const toOne = await s.bump(`${day}:notices:${to}`);
+  const all = await s.bump(`${day}:notices`);
+  if (toOne > s.noticesPerRecipient || all > s.noticesPerDay) {
     await s.done(key, false);
-    return { status: 429, said: "over the day's notices" };
+    return { status: 429, said: toOne > s.noticesPerRecipient ? "over the day's notices to this address" : "over the day's notices" };
   }
   try {
     await s.transport({ from, to, subject, text, inReplyTo: "", references: "" });

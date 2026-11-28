@@ -70,7 +70,7 @@ async function send(event: UrlEvent) {
     ...(b.notice === true ? { notice: true } : {}),
   };
   const out = await sendReply(reply, {
-    ...sending, perDay: c.limits.inboundPerDay, accountPerDay: c.limits.accountPerDay, noticesPerDay: c.limits.noticesPerDay,
+    ...sending, perDay: c.limits.inboundPerDay, accountPerDay: c.limits.accountPerDay, noticesPerDay: c.limits.noticesPerDay, noticesPerRecipient: c.limits.noticesPerRecipient,
     entries: c.entries, now: () => new Date(),
     transport: async (r) => {
       await ses.send(new SendEmailCommand({
