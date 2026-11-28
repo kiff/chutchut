@@ -161,12 +161,17 @@ describe("deploy", () => {
   // `up` against a stand-in for the aws command (never AWS itself): a failure inside $(topic) must stop the run, so
   // inherit_errexit can't be dropped without this going red. It needs bash 4.4 or later, as `up` does.
   const modern = spawnSync("bash", ["-c", "shopt -s inherit_errexit"]).status === 0;
-  function upWithStub(failOn: string, extra: Record<string, string> = {}): { status: number | null; out: string } {
+  // refuseFirst: a call refused its first `times` times, then answered (IAM catching up).
+  function upWithStub(failOn: string, extra: Record<string, string> = {}, refuseFirst?: { call: string; times: number }): { status: number | null; out: string; err: string; calls: string[] } {
     const dir = mkdtempSync(join(tmpdir(), "chutchut-aws-"));
     writeFileSync(join(dir, "aws"), `#!/usr/bin/env bash
 args="$*"
+echo "$args" >>"${dir}/calls"
 case "$args" in
   *"${failOn}"*) echo "stub refused: ${failOn}" >&2; exit 1 ;;
+  *"${refuseFirst?.call ?? "never-matches"}"*)
+    n=$(cat "${dir}/refused" 2>/dev/null || echo 0)
+    if (( n < ${refuseFirst?.times ?? 0} )); then echo $((n + 1)) >"${dir}/refused"; echo "AccessDeniedException: the role can't list the bucket" >&2; exit 1; fi ;;
   *"sts get-caller-identity"*) echo 000000000000 ;;
   *"kms describe-key"*) echo key-1 ;;
   *"sns create-topic"*) echo arn:aws:sns:eu-west-1:000000000000:chutchut-inbound ;;
@@ -176,6 +181,9 @@ esac
 exit 0
 `);
     chmodSync(join(dir, "aws"), 0o755);
+    // The script's waits pass at once here.
+    writeFileSync(join(dir, "sleep"), "#!/usr/bin/env bash\nexit 0\n");
+    chmodSync(join(dir, "sleep"), 0o755);
     // Stand-in built functions, so the stand-in run needs no build.
     for (const f of ["webhook", "reader", "stale", "provider"]) writeFileSync(join(dir, `${f}.mjs`), "export const handler = () => {};\n");
     const run = spawnSync("bash", ["deploy/aws.sh", "up"], {
@@ -184,7 +192,8 @@ exit 0
         CHUTCHUT_DIST: dir, CHUTCHUT_PAIRED: "ana@example.test", ...extra,
       },
     });
-    return { status: run.status, out: run.stdout.toString() };
+    const calls = spawnSync("cat", [join(dir, "calls")]).stdout.toString().trim().split("\n");
+    return { status: run.status, out: run.stdout.toString(), err: run.stderr.toString(), calls };
   }
 
   // `down` against a stand-in that answers as if everything `up` made were there, and logs each call.
@@ -248,17 +257,30 @@ exit 0
     expect(run.out).toContain("kept: bucket chutchut-inbound-test and table chutchut-mail");
   }, 20_000); // a few dozen stand-in calls: slow under a parallel run
 
+  it.skipIf(!modern)("tries the malware scan again while IAM catches up, and shows the refusal when it never does (against a stand-in)", () => {
+    const plan = "create-malware-protection-plan";
+    const late = upWithStub("never-matches", {}, { call: plan, times: 2 });
+    expect(late.status).toBe(0);
+    expect(late.calls.filter((c) => c.includes(plan))).toHaveLength(3);
+    expect(late.out).toContain("chutchut inbound: bucket chutchut-inbound-test");
+    const never = upWithStub("never-matches", {}, { call: plan, times: 99 });
+    expect(never.status).toBe(1);
+    expect(never.calls.filter((c) => c.includes(plan))).toHaveLength(7);
+    expect(never.err).toContain("couldn't create the malware scan of chutchut-inbound-test: AccessDeniedException");
+    expect(never.out).not.toContain("chutchut inbound:");
+  }, 20_000);
+
   it.skipIf(!modern)("runs to the end when every call succeeds (against a stand-in, never AWS)", () => {
     const run = upWithStub("never-matches");
     expect(run.status).toBe(0);
     expect(run.out).toContain("chutchut inbound: bucket chutchut-inbound-test");
-  });
+  }, 20_000);
 
   it.skipIf(!modern)("refuses a named rule set that doesn't exist, and never creates it (against a stand-in)", () => {
     const run = upWithStub("describe-receipt-rule-set --rule-set-name shared-st", { CHUTCHUT_RULE_SET: "shared-st" });
     expect(run.status).toBe(3);
     expect(run.out).not.toContain("chutchut inbound:");
-  });
+  }, 20_000);
 
   it.skipIf(!modern)("stops, and never reports success, when a call inside $(topic) or the table's setup fails", () => {
     for (const failOn of ["SignatureVersion", "KmsMasterKeyId", "put-key-policy", "--attribute-name Policy", "update-continuous-backups"]) {
@@ -266,5 +288,5 @@ exit 0
       expect(run.status, failOn).not.toBe(0);
       expect(run.out, failOn).not.toContain("chutchut inbound:");
     }
-  });
+  }, 20_000); // five stand-in runs: slow under a parallel run
 });

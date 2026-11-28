@@ -448,9 +448,17 @@ scan() {
     if [[ "$(aws guardduty get-malware-protection-plan --malware-protection-plan-id "$id" --query ProtectedResource.S3Bucket.BucketName)" == "$BUCKET" ]]; then plan=$id; fi
   done
   if [[ -z "$plan" ]]; then
-    aws guardduty create-malware-protection-plan --role "$role_arn" \
-      --protected-resource "{\"S3Bucket\":{\"BucketName\":\"$BUCKET\",\"ObjectPrefixes\":[\"$PREFIX\"]}}" \
-      --actions '{"Tagging":{"Status":"ENABLED"}}' --query MalwareProtectionPlanId >/dev/null
+    # GuardDuty checks the role's rights as it creates the plan, and a right just added to a role that already
+    # existed takes a moment to reach it (IAM is eventually consistent): the first live run was refused once, then
+    # went through a minute later. So it's tried again for up to a minute, and the last refusal is shown if none passed.
+    local i err
+    for i in 1 2 3 4 5 6 7; do
+      if err=$(aws guardduty create-malware-protection-plan --role "$role_arn" \
+        --protected-resource "{\"S3Bucket\":{\"BucketName\":\"$BUCKET\",\"ObjectPrefixes\":[\"$PREFIX\"]}}" \
+        --actions '{"Tagging":{"Status":"ENABLED"}}' --query MalwareProtectionPlanId 2>&1 >/dev/null); then break; fi
+      [[ $i == 7 ]] && { echo "couldn't create the malware scan of $BUCKET: $err" >&2; exit 1; }
+      sleep 10
+    done
   fi
 }
 

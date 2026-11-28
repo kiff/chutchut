@@ -1,0 +1,1 @@
+- **`deploy/aws.sh up` waits for IAM before the malware scan.** A right just added to the scan role can take a moment to reach GuardDuty, which refused the first live run once. The plan is now tried again for up to a minute, and the last refusal is shown if none passes.
