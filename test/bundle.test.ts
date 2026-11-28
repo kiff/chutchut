@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { build } from "esbuild";
 import { afterAll, describe, expect, it } from "vitest";
 // @ts-expect-error a plain module, no types
-import { options } from "../scripts/build.mjs";
+import { entries, options } from "../scripts/build.mjs";
 
 // What's deployed is the bundle, not the TypeScript: the reader crashed at load on every message once bundled
 // ("Dynamic require of "stream" is not supported", from mailparser's CommonJS dependencies), while every source test passed.
@@ -30,4 +30,22 @@ describe("bundle", () => {
     expect(j).toMatchObject({ id: "0100abc", subject: "Refund please", message_id: "<m1@example.test>" });
     expect(String(j.text).trim()).toBe("Hello, order 42 please.");
   }, 60_000);
+});
+
+// Every function, built as it's deployed, loads in plain Node: the next CommonJS dependency anywhere is caught here, not on
+// the first message. Outside AWS each stops at its first missing setting, which is past where a bundle fails to load.
+describe("every bundle", () => {
+  // Inside the project, so the AWS SDK the bundles leave out (Lambda has it) resolves from node_modules.
+  const dir = mkdtempSync(join(process.cwd(), ".bundle-test-"));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("loads each function's bundle in plain Node, stopping only at a missing setting", async () => {
+    await build({ ...options, entryPoints: entries.map((e: string) => join(process.cwd(), e)), outdir: dir });
+    for (const name of ["webhook", "reader", "stale", "provider"]) {
+      const run = join(dir, `load-${name}.mjs`);
+      writeFileSync(run, `try { await import("./${name}.mjs"); console.log("loaded"); } catch (e) { console.log(String(e && e.message)); }\n`);
+      const said = execFileSync(process.execPath, [run], { encoding: "utf8", env: { PATH: process.env.PATH ?? "" } }).trim();
+      expect(said === "loaded" || /isn't set$/.test(said), `${name}: ${said}`).toBe(true);
+    }
+  }, 120_000);
 });
