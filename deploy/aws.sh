@@ -146,6 +146,7 @@ scan_policy() { # account
  {"Sid":"Notifications","Effect":"Allow","Action":["s3:PutBucketNotification","s3:GetBucketNotification"],
   "Resource":"arn:aws:s3:::$BUCKET"},
  {"Sid":"Validation","Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::$BUCKET/malware-protection-resource-validation-object"},
+ {"Sid":"CheckBucketOwnership","Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::$BUCKET"},
  {"Sid":"ScanAndTag","Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion","s3:PutObjectTagging","s3:GetObjectTagging","s3:PutObjectVersionTagging","s3:GetObjectVersionTagging"],
   "Resource":"arn:aws:s3:::$BUCKET/$PREFIX*"}
 ]}

@@ -1,0 +1,1 @@
+- **The malware scan can be set up.** Its role may now list the bucket, which GuardDuty needs to check who owns it; without that, `deploy/aws.sh up` stopped at the scan.
