@@ -33,8 +33,9 @@ export async function handler(event: UrlEvent) {
   if (!MESSAGE_ID.test(id)) return answer(400, { error: "not an email id" });
   const got = await db.send(new GetItemCommand({
     TableName: c.table, Key: { pk: { S: `msg#${id}` } }, ConsistentRead: true,
-    ProjectionExpression: "#s, #at, shown, clean, auth, objectKey, purgeAt, #from, recipient",
-    ExpressionAttributeNames: { "#s": "state", "#at": "at", "#from": "from" },
+    // `auth` is one of DynamoDB's reserved words, as `state`, `at` and `from` are: each is named through a #name.
+    ProjectionExpression: "#s, #at, shown, clean, #auth, objectKey, purgeAt, #from, recipient",
+    ExpressionAttributeNames: { "#s": "state", "#at": "at", "#from": "from", "#auth": "auth" },
   }));
   const i = got.Item;
   const item = i && { state: i.state?.S ?? "", shown: i.shown?.S === "yes", clean: i.clean?.S === "yes" };

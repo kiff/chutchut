@@ -1,0 +1,1 @@
+- **tafs can read a filed message again.** The provider's read named the `auth` attribute bare, and `auth` is one of DynamoDB's reserved words, so every read failed against the real table. It's named through `#auth` now, and a test reads every DynamoDB expression in the source and fails on any bare reserved word.
