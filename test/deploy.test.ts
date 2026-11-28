@@ -185,12 +185,13 @@ exit 0
   }
 
   // `down` against a stand-in that answers as if everything `up` made were there, and logs each call.
-  function downWithStub(): { status: number | null; out: string; calls: string[] } {
+  function downWithStub(ruleMissing = false): { status: number | null; out: string; err: string; calls: string[] } {
     const dir = mkdtempSync(join(tmpdir(), "chutchut-aws-"));
     writeFileSync(join(dir, "aws"), `#!/usr/bin/env bash
 args="$*"
 echo "$args" >>"${dir}/calls"
 case "$args" in
+  ${ruleMissing ? '*"describe-receipt-rule "*) exit 254 ;;' : ""}
   *"sts get-caller-identity"*) echo 000000000000 ;;
   *"describe-active-receipt-rule-set"*) echo shared-set ;;
   *"list-targets-by-rule"*) echo reader ;;
@@ -206,8 +207,15 @@ exit 0
       env: { PATH: `${dir}:${process.env.PATH}`, CHUTCHUT_BUCKET: "chutchut-inbound-test", CHUTCHUT_RULE_SET: "shared-set", CHUTCHUT_DOWN: "yes" },
     });
     const calls = spawnSync("cat", [join(dir, "calls")]).stdout.toString().trim().split("\n");
-    return { status: run.status, out: run.stdout.toString(), calls };
+    return { status: run.status, out: run.stdout.toString(), err: run.stderr.toString(), calls };
   }
+
+  it("down refuses, and removes nothing, when the rule isn't in the named set but the functions are still there", () => {
+    const run = downWithStub(true);
+    expect(run.status).toBe(3);
+    expect(run.err).toContain("set CHUTCHUT_RULE_SET to the set up used");
+    expect(run.calls.some((c) => /\b(delete|remove|schedule)-/.test(c))).toBe(false);
+  }, 20_000);
 
   it("down stops the mail first, never touches the shared set, and keeps the bucket and the table (against a stand-in)", () => {
     const run = downWithStub();

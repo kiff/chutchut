@@ -234,6 +234,11 @@ down() {
   if aws ses describe-receipt-rule --rule-set-name "$RULE_SET" --rule-name "$RULE" >/dev/null 2>&1; then
     aws ses delete-receipt-rule --rule-set-name "$RULE_SET" --rule-name "$RULE"
     echo "removed rule $RULE_SET/$RULE: no more mail arrives"
+  elif aws lambda get-function --function-name "$NAME-webhook" --query Configuration.FunctionName >/dev/null 2>&1; then
+    # The functions are still there but the rule isn't in this set: it's most likely in the set `up` was given. Going on
+    # would leave that rule writing mail to the bucket and naming a deleted topic, so stop before removing anything.
+    echo "no rule $RULE in rule set $RULE_SET, but chutchut's functions are still there: set CHUTCHUT_RULE_SET to the set up used. Nothing removed." >&2
+    exit 3
   fi
   if [[ "$RULE_SET" == "$NAME" ]] && aws ses describe-receipt-rule-set --rule-set-name "$RULE_SET" >/dev/null 2>&1; then
     active=$(aws ses describe-active-receipt-rule-set --query Metadata.Name)
