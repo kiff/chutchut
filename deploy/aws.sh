@@ -7,6 +7,9 @@
 #
 #   deploy/aws.sh up         create or update everything above
 #   deploy/aws.sh policies   print the policies it would set, as JSON, without calling AWS (for review and tests)
+#   deploy/aws.sh down       take it back down (needs CHUTCHUT_DOWN=yes): the rule first, so mail stops before anything
+#                            else goes, then the triggers, functions, roles, scan, topics and key. It keeps the bucket and
+#                            the table, which hold mail, and says how to remove them by hand.
 #
 # Environment:
 #   CHUTCHUT_BUCKET      the bucket's name (required: bucket names are global)
@@ -20,6 +23,10 @@
 #                        Both parameters are put there by their owner, never by this script or in this repository.
 #   CHUTCHUT_ALERT_EMAIL an address the daily alert is mailed to (optional: it confirms by mail before any arrives)
 #   AWS_REGION           default eu-west-1, where SES receives mail
+#   CHUTCHUT_RULE_SET    the SES rule set chutchut's rule goes in (default: one of its own, named like the prefix). SES
+#                        has one active rule set per region, so where another set is already active, name it here: the
+#                        rule joins it for chutchut's own recipients only, and the set's other rules are left as they are.
+#                        A set named here must already exist; this script never creates it.
 #   CHUTCHUT_ACTIVATE    "yes" makes chutchut's rule set the region's active one. SES has one active rule set per region, so
 #                        it's off unless asked for, and refused while another set is active: activating would silently
 #                        stop the mail that set receives.
@@ -61,7 +68,8 @@ MODE_=${CHUTCHUT_MODE:-inbox}
 [[ "$MODE_" == tafs ]] && FUNCTIONS="$FUNCTIONS provider"
 TABLE=$NAME-mail
 TOPIC_KEY=alias/$NAME-inbound-topic
-RULE_SET=$NAME
+RULE_SET=${CHUTCHUT_RULE_SET:-$NAME}
+[[ "$RULE_SET" =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || { echo "CHUTCHUT_RULE_SET isn't a rule set name" >&2; exit 2; }
 RULE=$NAME-inbound
 SCAN_ROLE=$NAME-malware-scan
 PREFIX=in/
@@ -208,7 +216,92 @@ if [[ "$MODE" == policies ]]; then
   printf '%s\n' "{\"bucket\":$(bucket_policy $account),\"topic\":$(topic_policy $account "$arn"),\"topic_key\":$(topic_key_policy $account),\"lifecycle\":$(lifecycle),\"scan_trust\":$(scan_trust),\"scan\":$(scan_policy $account),\"lambda_trust\":$(lambda_trust),\"webhook\":$(function_policy $account webhook),\"reader\":$(function_policy $account reader),\"stale\":$(function_policy $account stale),\"scan_rule\":$(scan_rule_pattern)$provider}"
   exit 0
 fi
-[[ "$MODE" == up ]] || { echo "usage: deploy/aws.sh up | policies" >&2; exit 2; }
+# A role and its inline policies.
+role_down() { # role
+  aws iam get-role --role-name "$1" --query Role.RoleName >/dev/null 2>&1 || return 0
+  local p
+  for p in $(aws iam list-role-policies --role-name "$1" --query PolicyNames); do
+    aws iam delete-role-policy --role-name "$1" --policy-name "$p"
+  done
+  aws iam delete-role --role-name "$1"
+  echo "removed role $1"
+}
+
+# Everything `up` makes except the bucket and the table, in the order that stops mail first. Each piece that's
+# already gone is skipped, so a rerun finishes what an interrupted one started.
+down() {
+  local active r ids f fn plans id key account t set
+  if aws ses describe-receipt-rule --rule-set-name "$RULE_SET" --rule-name "$RULE" >/dev/null 2>&1; then
+    aws ses delete-receipt-rule --rule-set-name "$RULE_SET" --rule-name "$RULE"
+    echo "removed rule $RULE_SET/$RULE: no more mail arrives"
+  else
+    # Not in this set. If it's in another one (the set `up` was given), going on would leave it writing mail to the
+    # bucket and naming a deleted topic: stop before removing anything. If it's in none, an earlier down already
+    # removed it, so go on and finish what that run started.
+    for set in $(aws ses list-receipt-rule-sets --query 'RuleSets[].Name'); do
+      if aws ses describe-receipt-rule --rule-set-name "$set" --rule-name "$RULE" >/dev/null 2>&1; then
+        echo "rule $RULE is in rule set $set, not $RULE_SET: set CHUTCHUT_RULE_SET=$set. Nothing removed." >&2
+        exit 3
+      fi
+    done
+  fi
+  if [[ "$RULE_SET" == "$NAME" ]] && aws ses describe-receipt-rule-set --rule-set-name "$RULE_SET" >/dev/null 2>&1; then
+    active=$(aws ses describe-active-receipt-rule-set --query Metadata.Name)
+    if [[ "$active" == "$RULE_SET" ]]; then
+      echo "rule set $RULE_SET is the active one: kept (it has no chutchut rule now)" >&2
+    else
+      aws ses delete-receipt-rule-set --rule-set-name "$RULE_SET"
+      echo "removed rule set $RULE_SET"
+    fi
+  fi
+  for r in scanned stale-daily; do
+    aws events describe-rule --name "$NAME-$r" --query Name >/dev/null 2>&1 || continue
+    ids=$(aws events list-targets-by-rule --rule "$NAME-$r" --query 'Targets[].Id')
+    if [[ -n "$ids" && "$ids" != None ]]; then
+      # shellcheck disable=SC2086 # one id per word
+      aws events remove-targets --rule "$NAME-$r" --ids $ids >/dev/null
+    fi
+    aws events delete-rule --name "$NAME-$r"
+    echo "removed trigger $NAME-$r"
+  done
+  for f in webhook reader stale provider; do
+    fn=$NAME-$f
+    if aws lambda get-function --function-name "$fn" --query Configuration.FunctionName >/dev/null 2>&1; then
+      aws lambda delete-function --function-name "$fn" # its URL goes with it
+      echo "removed function $fn"
+    fi
+    role_down "$fn"
+  done
+  plans=$(aws guardduty list-malware-protection-plans --query 'MalwareProtectionPlans[].MalwareProtectionPlanId')
+  for id in $plans; do
+    if [[ "$(aws guardduty get-malware-protection-plan --malware-protection-plan-id "$id" --query ProtectedResource.S3Bucket.BucketName)" == "$BUCKET" ]]; then
+      aws guardduty delete-malware-protection-plan --malware-protection-plan-id "$id"
+      echo "removed the malware scan of $BUCKET"
+    fi
+  done
+  role_down "$SCAN_ROLE"
+  account=$(aws sts get-caller-identity --query Account)
+  for t in "$TOPIC" "$ALERTS"; do
+    if aws sns get-topic-attributes --topic-arn "arn:aws:sns:$REGION:$account:$t" --query 'Attributes.TopicArn' >/dev/null 2>&1; then
+      aws sns delete-topic --topic-arn "arn:aws:sns:$REGION:$account:$t" # its subscriptions go with it
+      echo "removed topic $t"
+    fi
+  done
+  if key=$(aws kms describe-key --key-id "$TOPIC_KEY" --query KeyMetadata.KeyId 2>/dev/null); then
+    aws kms delete-alias --alias-name "$TOPIC_KEY"
+    aws kms schedule-key-deletion --key-id "$key" --pending-window-in-days 7 --query KeyState >/dev/null
+    echo "the topic's key is deleted in 7 days (aws kms cancel-key-deletion stops that)"
+  fi
+  echo "kept: bucket $BUCKET and table $TABLE (they hold mail), and the functions' logs (30-day retention)."
+  echo "  to remove them by hand: empty and delete the bucket; turn off the table's deletion protection, then delete it"
+}
+
+if [[ "$MODE" == down ]]; then
+  [[ "${CHUTCHUT_DOWN:-}" == yes ]] || { echo "down stops chutchut's mail and removes what up made, except the bucket and the table: set CHUTCHUT_DOWN=yes" >&2; exit 2; }
+  down
+  exit 0
+fi
+[[ "$MODE" == up ]] || { echo "usage: deploy/aws.sh up | down | policies" >&2; exit 2; }
 RECIPIENTS=${CHUTCHUT_RECIPIENTS:?CHUTCHUT_RECIPIENTS names the addresses or domains SES receives for}
 # Each an address or a domain, nothing else: a typo here would receive mail for the wrong name, or none.
 RECIPIENT='^([A-Za-z0-9._%+-]+@)?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$'
@@ -318,6 +411,8 @@ rule() { # topic-arn
   body="{\"Name\":\"$RULE\",\"Enabled\":true,\"TlsPolicy\":\"Require\",\"ScanEnabled\":true,\"Recipients\":[$recipients],
     \"Actions\":[{\"S3Action\":{\"BucketName\":\"$BUCKET\",\"ObjectKeyPrefix\":\"$PREFIX\",\"TopicArn\":\"$1\"}}]}"
   if ! aws ses describe-receipt-rule-set --rule-set-name "$RULE_SET" >/dev/null 2>&1; then
+    # A set named in CHUTCHUT_RULE_SET belongs to someone else: a typo must not make a new, silent one.
+    [[ "$RULE_SET" == "$NAME" ]] || { echo "rule set $RULE_SET doesn't exist in $REGION; not created" >&2; exit 3; }
     aws ses create-receipt-rule-set --rule-set-name "$RULE_SET" >/dev/null
   fi
   if aws ses describe-receipt-rule --rule-set-name "$RULE_SET" --rule-name "$RULE" >/dev/null 2>&1; then
@@ -459,4 +554,6 @@ trigger scanned reader --event-pattern "$(scan_rule_pattern)"
 trigger stale-daily stale --schedule-expression "rate(1 day)"
 rule "$arn"
 activate
-echo "chutchut inbound: bucket $BUCKET, table $TABLE, topic $TOPIC, rule $RULE_SET/$RULE in $REGION$([[ "$ACTIVATE" == yes ]] && echo ', active' || echo ', not active')"
+# Read back, not assumed: a rule in a set that was already active receives mail without CHUTCHUT_ACTIVATE.
+active=$(aws ses describe-active-receipt-rule-set --query Metadata.Name)
+echo "chutchut inbound: bucket $BUCKET, table $TABLE, topic $TOPIC, rule $RULE_SET/$RULE in $REGION$([[ "$active" == "$RULE_SET" ]] && echo ', receiving' || echo ', not active')"
