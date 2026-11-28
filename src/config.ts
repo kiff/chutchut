@@ -72,6 +72,7 @@ export function config(env: Record<string, string | undefined>): Config {
       knocksPerSender: count(env, "CHUTCHUT_KNOCKS_PER_SENDER", 1),
       knocksPerDomain: count(env, "CHUTCHUT_KNOCKS_PER_DOMAIN", 10),
       knocksPerDay: count(env, "CHUTCHUT_KNOCKS_PER_DAY", 50),
+      noticesPerDay: count(env, "CHUTCHUT_NOTICES_PER_DAY", 50),
     },
   };
 }
