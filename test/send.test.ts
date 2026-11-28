@@ -3,7 +3,7 @@ import { sendReply, type Reply, type Sending } from "../src/send.js";
 
 const now = new Date("2026-11-27T18:00:00Z");
 
-function setup(over: Partial<{ state: string; shown: boolean; clean: boolean; purgeAt: string; perDay: number; accountPerDay: number; failSend: number }> = {}) {
+function setup(over: Partial<{ state: string; shown: boolean; clean: boolean; purgeAt: string; perDay: number; accountPerDay: number; noticesPerDay: number; noticesPerRecipient: number; failSend: number }> = {}) {
   const sent: unknown[] = [];
   const keys = new Map<string, "sending" | "sent" | "failed">();
   const counts = new Map<string, number>();
@@ -25,6 +25,8 @@ function setup(over: Partial<{ state: string; shown: boolean; clean: boolean; pu
     async transport(r) { if (failing > 0) { failing -= 1; throw new Error("ses down"); } sent.push(r); },
     perDay: over.perDay ?? 100,
     accountPerDay: over.accountPerDay ?? 1000,
+    noticesPerDay: over.noticesPerDay ?? 5000,
+    noticesPerRecipient: over.noticesPerRecipient ?? 100,
     entries: ["kiff.test"],
     now: () => now,
   };
@@ -100,5 +102,43 @@ describe("send", () => {
     await sendReply(reply(), s);
     expect(await sendReply(reply({ idempotencyKey: "run-9:reply" }), s)).toMatchObject({ status: 429 });
     expect(sent).toHaveLength(1);
+  });
+
+  // tafs's own mail that answers no message: the owner's copy of a door's answer, a report to support.
+  const notice = (over: Partial<Reply> = {}): Reply => ({
+    from: "Support <support@kiff.test>", to: ["owner@company.test"], subject: "Support: answered Ana", text: "Support answered Ana.",
+    idempotencyKey: "door-owner:1", notice: true, ...over,
+  });
+
+  it("sends a notice to one address, from one of ours, never threaded", async () => {
+    const { s, sent } = setup();
+    expect(await sendReply(notice(), s)).toEqual({ status: 200, said: "sent" });
+    expect(sent).toEqual([{ from: "support@kiff.test", to: "owner@company.test", subject: "Support: answered Ana", text: "Support answered Ana.", inReplyTo: "", references: "" }]);
+    expect(await sendReply(notice(), s)).toEqual({ status: 200, said: "sent before" });
+    expect(sent).toHaveLength(1);
+  });
+
+  it("never sends a notice from an address that isn't ours, to more than one, or past the day's cap", async () => {
+    const { s, sent } = setup({ noticesPerDay: 1 });
+    expect(await sendReply(notice({ from: "boss@elsewhere.test" }), s)).toMatchObject({ status: 403, said: "only from an address of ours" });
+    expect(await sendReply(notice({ to: ["a@x.test", "b@x.test"] }), s)).toMatchObject({ status: 400 });
+    expect(await sendReply(notice({ idempotencyKey: "n" }), s)).toMatchObject({ status: 400 });
+    expect(await sendReply(notice({ idempotencyKey: "door-owner:1" }), s)).toEqual({ status: 200, said: "sent" });
+    expect(await sendReply(notice({ idempotencyKey: "door-owner:2" }), s)).toMatchObject({ status: 429, said: "over the day's notices" });
+    expect(sent).toHaveLength(1);
+  });
+
+  it("caps notices to any one address apart from the total, so one busy owner never takes another's", async () => {
+    const { s, sent } = setup({ noticesPerRecipient: 1 });
+    expect(await sendReply(notice({ idempotencyKey: "door-owner:1" }), s)).toEqual({ status: 200, said: "sent" });
+    expect(await sendReply(notice({ idempotencyKey: "door-owner:2" }), s)).toMatchObject({ status: 429, said: "over the day's notices to this address" });
+    expect(await sendReply(notice({ idempotencyKey: "door-owner:3", to: ["other@company.test"] }), s)).toEqual({ status: 200, said: "sent" });
+    expect(sent).toHaveLength(2);
+  });
+
+  it("keeps a reply a reply: without notice, a mail that answers no message is still refused", async () => {
+    const { s, sent } = setup();
+    expect(await sendReply(notice({ notice: undefined }), s)).toMatchObject({ status: 403, said: "only a reply to a message that came here" });
+    expect(sent).toHaveLength(0);
   });
 });

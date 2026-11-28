@@ -54,7 +54,7 @@ export async function handler(event: UrlEvent) {
 async function send(event: UrlEvent) {
   const text = event.isBase64Encoded ? Buffer.from(event.body ?? "", "base64").toString("utf8") : (event.body ?? "");
   if (text.length > 200_000) return answer(413, { error: "too large" });
-  let b: { from?: unknown; to?: unknown; subject?: unknown; text?: unknown; headers?: Record<string, unknown> };
+  let b: { from?: unknown; to?: unknown; subject?: unknown; text?: unknown; headers?: Record<string, unknown>; notice?: unknown };
   try {
     b = JSON.parse(text);
   } catch {
@@ -67,15 +67,18 @@ async function send(event: UrlEvent) {
     ...(typeof h["In-Reply-To"] === "string" ? { inReplyTo: h["In-Reply-To"] } : {}),
     ...(typeof h.References === "string" ? { references: h.References } : {}),
     ...(event.headers?.["idempotency-key"] !== undefined ? { idempotencyKey: event.headers["idempotency-key"] } : {}),
+    ...(b.notice === true ? { notice: true } : {}),
   };
   const out = await sendReply(reply, {
-    ...sending, perDay: c.limits.inboundPerDay, accountPerDay: c.limits.accountPerDay, entries: c.entries, now: () => new Date(),
+    ...sending, perDay: c.limits.inboundPerDay, accountPerDay: c.limits.accountPerDay, noticesPerDay: c.limits.noticesPerDay, noticesPerRecipient: c.limits.noticesPerRecipient,
+    entries: c.entries, now: () => new Date(),
     transport: async (r) => {
       await ses.send(new SendEmailCommand({
         FromEmailAddress: r.from, Destination: { ToAddresses: [r.to] },
         Content: { Simple: {
           Subject: { Data: r.subject, Charset: "UTF-8" }, Body: { Text: { Data: r.text, Charset: "UTF-8" } },
-          Headers: [{ Name: "In-Reply-To", Value: r.inReplyTo }, { Name: "References", Value: r.references }],
+          // A reply is threaded under the message it answers; a notice answers none.
+          ...(r.inReplyTo !== "" ? { Headers: [{ Name: "In-Reply-To", Value: r.inReplyTo }, { Name: "References", Value: r.references }] } : {}),
         } },
       }));
     },

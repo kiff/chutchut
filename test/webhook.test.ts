@@ -58,7 +58,7 @@ function setup(limits: Partial<Webhook["limits"]> = {}, failures = 0) {
   const w: Webhook = {
     sns: { topicArn, now: () => now, certificate: async () => pem },
     bucket, store, paired: async () => pairing(["ana@example.test"]),
-    limits: { inboundPerDay: 100, accountPerDay: 1000, knocksPerSender: 1, knocksPerDomain: 3, knocksPerDay: 50, ...limits },
+    limits: { inboundPerDay: 100, accountPerDay: 1000, knocksPerSender: 1, knocksPerDomain: 3, knocksPerDay: 50, noticesPerDay: 5000, noticesPerRecipient: 100, ...limits },
     confirm: async (url) => { confirmed.push(url); },
   };
   return { w, store, confirmed };

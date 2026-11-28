@@ -12,7 +12,7 @@ describe("config", () => {
   it("reads every setting, the paired senders keyed as the door keys them, and the Solo plan's limits by default", () => {
     const c = config(env);
     expect([...c.paired]).toEqual(["ana@example.test", "bob@example.test"]);
-    expect(c.limits).toEqual({ inboundPerDay: 100, accountPerDay: 100, knocksPerSender: 1, knocksPerDomain: 10, knocksPerDay: 50 });
+    expect(c.limits).toEqual({ inboundPerDay: 100, accountPerDay: 100, knocksPerSender: 1, knocksPerDomain: 10, knocksPerDay: 50, noticesPerDay: 5000, noticesPerRecipient: 100 });
     expect(config({ ...env, CHUTCHUT_INBOUND_PER_DAY: "500" }).limits.inboundPerDay).toBe(500);
   });
 

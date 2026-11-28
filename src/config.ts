@@ -72,6 +72,9 @@ export function config(env: Record<string, string | undefined>): Config {
       knocksPerSender: count(env, "CHUTCHUT_KNOCKS_PER_SENDER", 1),
       knocksPerDomain: count(env, "CHUTCHUT_KNOCKS_PER_DOMAIN", 10),
       knocksPerDay: count(env, "CHUTCHUT_KNOCKS_PER_DAY", 50),
+      // Sized for every account's door answers in a day together; each address gets at most as many as one inbox takes.
+      noticesPerDay: count(env, "CHUTCHUT_NOTICES_PER_DAY", 5000),
+      noticesPerRecipient: count(env, "CHUTCHUT_NOTICES_PER_RECIPIENT", 100),
     },
   };
 }
