@@ -185,13 +185,16 @@ exit 0
   }
 
   // `down` against a stand-in that answers as if everything `up` made were there, and logs each call.
-  function downWithStub(ruleMissing = false): { status: number | null; out: string; err: string; calls: string[] } {
+  // ruleIn: where the stand-in keeps the rule ("named": the set down is given; "other": another set; "none": already gone).
+  function downWithStub(ruleIn: "named" | "other" | "none" = "named"): { status: number | null; out: string; err: string; calls: string[] } {
     const dir = mkdtempSync(join(tmpdir(), "chutchut-aws-"));
     writeFileSync(join(dir, "aws"), `#!/usr/bin/env bash
 args="$*"
 echo "$args" >>"${dir}/calls"
 case "$args" in
-  ${ruleMissing ? '*"describe-receipt-rule "*) exit 254 ;;' : ""}
+  ${ruleIn === "other" ? '*"describe-receipt-rule --rule-set-name elsewhere "*) exit 0 ;;' : ""}
+  ${ruleIn !== "named" ? '*"describe-receipt-rule "*) exit 254 ;;' : ""}
+  *"list-receipt-rule-sets"*) printf 'shared-set\\telsewhere\\n' ;;
   *"sts get-caller-identity"*) echo 000000000000 ;;
   *"describe-active-receipt-rule-set"*) echo shared-set ;;
   *"list-targets-by-rule"*) echo reader ;;
@@ -210,11 +213,19 @@ exit 0
     return { status: run.status, out: run.stdout.toString(), err: run.stderr.toString(), calls };
   }
 
-  it("down refuses, and removes nothing, when the rule isn't in the named set but the functions are still there", () => {
-    const run = downWithStub(true);
+  it("down refuses, and removes nothing, when the rule is in another set than the one named", () => {
+    const run = downWithStub("other");
     expect(run.status).toBe(3);
-    expect(run.err).toContain("set CHUTCHUT_RULE_SET to the set up used");
+    expect(run.err).toContain("set CHUTCHUT_RULE_SET=elsewhere");
     expect(run.calls.some((c) => /\b(delete|remove|schedule)-/.test(c))).toBe(false);
+  }, 20_000);
+
+  it("down finishes an interrupted run: the rule is already gone everywhere, the rest is removed", () => {
+    const run = downWithStub("none");
+    expect(run.status).toBe(0);
+    expect(run.calls.some((c) => c.includes("delete-receipt-rule "))).toBe(false);
+    expect(run.calls.some((c) => c.endsWith("lambda delete-function --function-name chutchut-webhook"))).toBe(true);
+    expect(run.out).toContain("kept: bucket chutchut-inbound-test");
   }, 20_000);
 
   it("down stops the mail first, never touches the shared set, and keeps the bucket and the table (against a stand-in)", () => {
