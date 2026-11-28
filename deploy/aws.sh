@@ -509,14 +509,29 @@ function_up() { # name topic-arn alerts-arn
   rm -rf "$dir"
 }
 
+# A public function URL (auth NONE) needs two statements in the function's policy: lambda:InvokeFunctionUrl, and
+# lambda:InvokeFunction limited to calls through the URL. With the first alone, the URL answers 403 to everyone, SNS's
+# subscription confirmation included, so no mail is ever filed. Each is added once, by its own statement id, so a rerun
+# also repairs a function made before the second one was required.
+url_public() { # function
+  local policy; policy=$(aws lambda get-policy --function-name "$1" --query Policy 2>/dev/null || true)
+  if ! grep -q '"Sid":"url"' <<<"$policy"; then
+    aws lambda add-permission --function-name "$1" --statement-id url --action lambda:InvokeFunctionUrl \
+      --principal '*' --function-url-auth-type NONE >/dev/null
+  fi
+  if ! grep -q '"Sid":"url-invoke"' <<<"$policy"; then
+    aws lambda add-permission --function-name "$1" --statement-id url-invoke --action lambda:InvokeFunction \
+      --principal '*' --invoked-via-function-url >/dev/null
+  fi
+}
+
 # The webhook's public URL, subscribed to the topic over HTTPS: the webhook confirms the subscription itself.
 webhook_up() { # topic-arn
   local fn=$NAME-webhook url
   if ! aws lambda get-function-url-config --function-name "$fn" --query FunctionUrl >/dev/null 2>&1; then
     aws lambda create-function-url-config --function-name "$fn" --auth-type NONE --query FunctionUrl >/dev/null
-    aws lambda add-permission --function-name "$fn" --statement-id url --action lambda:InvokeFunctionUrl \
-      --principal '*' --function-url-auth-type NONE >/dev/null
   fi
+  url_public "$fn"
   url=$(aws lambda get-function-url-config --function-name "$fn" --query FunctionUrl)
   if ! aws sns list-subscriptions-by-topic --topic-arn "$1" --query 'Subscriptions[].Endpoint' | tr '\t' '\n' | grep -qx "$url"; then
     aws sns subscribe --topic-arn "$1" --protocol https --notification-endpoint "$url" >/dev/null
@@ -554,9 +569,8 @@ webhook_up "$arn"
 if [[ "$MODE_" == tafs ]]; then
   if ! aws lambda get-function-url-config --function-name "$NAME-provider" --query FunctionUrl >/dev/null 2>&1; then
     aws lambda create-function-url-config --function-name "$NAME-provider" --auth-type NONE --query FunctionUrl >/dev/null
-    aws lambda add-permission --function-name "$NAME-provider" --statement-id url --action lambda:InvokeFunctionUrl \
-      --principal '*' --function-url-auth-type NONE >/dev/null
   fi
+  url_public "$NAME-provider"
   echo "tafs cloud's provider URL: $(aws lambda get-function-url-config --function-name "$NAME-provider" --query FunctionUrl)"
 fi
 trigger scanned reader --event-pattern "$(scan_rule_pattern)"

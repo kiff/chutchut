@@ -196,6 +196,19 @@ exit 0
     return { status: run.status, out: run.stdout.toString(), err: run.stderr.toString(), calls };
   }
 
+  it.skipIf(!modern)("makes each public URL callable: both statements, on the webhook and on tafs's read API (against a stand-in)", () => {
+    const run = upWithStub("never-matches", {
+      CHUTCHUT_MODE: "tafs", CHUTCHUT_TAFS_WEBHOOK: "https://cloud.example.test/v1/doors/email",
+      CHUTCHUT_WEBHOOK_SECRET_PARAM: "/chutchut/webhook-secret", CHUTCHUT_READ_KEY_PARAM: "/chutchut/read-key",
+    });
+    expect(run.status, run.err).toBe(0);
+    for (const fn of ["chutchut-webhook", "chutchut-provider"]) {
+      const adds = run.calls.filter((c) => c.includes(`lambda add-permission --function-name ${fn} `));
+      expect(adds.some((c) => c.includes("--statement-id url --action lambda:InvokeFunctionUrl") && c.includes("--function-url-auth-type NONE")), fn).toBe(true);
+      expect(adds.some((c) => c.includes("--statement-id url-invoke --action lambda:InvokeFunction ") && c.includes("--invoked-via-function-url")), fn).toBe(true);
+    }
+  }, 60_000);
+
   // `down` against a stand-in that answers as if everything `up` made were there, and logs each call.
   // ruleIn: where the stand-in keeps the rule ("named": the set down is given; "other": another set; "none": already gone).
   function downWithStub(ruleIn: "named" | "other" | "none" = "named"): { status: number | null; out: string; err: string; calls: string[] } {
